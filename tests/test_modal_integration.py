@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+from typing import cast
 
 import nbformat
 import pytest
 
+from runbook.events import NotebookEvent
 from runbook.modal_app import ModalRunOptions, stream_remote_events
 
 
@@ -22,7 +24,10 @@ def test_real_modal_execution_round_trip():
             ModalRunOptions(timeout=300, gpu=None, allow_errors=False),
         )
     )
-    output_event = [event for event in events if event.get("event") == "notebook"][-1]
+    output_event = cast(
+        NotebookEvent,
+        [event for event in events if event.get("event") == "notebook"][-1],
+    )
     executed = nbformat.reads(output_event["data"], as_version=4)
 
     assert any(event.get("event") == "started" for event in events)

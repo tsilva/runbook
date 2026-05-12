@@ -1,15 +1,37 @@
 from __future__ import annotations
 
 import os
+import queue
+import threading
 import traceback as traceback_module
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
 import nbformat
 from nbclient import NotebookClient
 from nbclient.exceptions import CellExecutionError
 
-Event = dict[str, Any]
+from runbook.events import DebugInfo, Event
+
+
+class StreamingNotebookClient(NotebookClient):
+    """NotebookClient that reports newly appended outputs through a callback."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.runbook_output_callback = kwargs.pop("runbook_output_callback", None)
+        super().__init__(*args, **kwargs)
+
+    def output(
+        self,
+        outs: list[nbformat.NotebookNode],
+        msg: dict[str, Any],
+        display_id: str | None,
+        cell_index: int,
+    ) -> nbformat.NotebookNode | None:
+        out = super().output(outs, msg, display_id, cell_index)
+        if out is not None and self.runbook_output_callback is not None:
+            self.runbook_output_callback(out)
+        return out
 
 
 def execute_notebook_events(
@@ -43,7 +65,7 @@ def execute_notebook_events(
     }
 
     os.makedirs(workdir, exist_ok=True)
-    client = NotebookClient(
+    client = StreamingNotebookClient(
         notebook,
         timeout=timeout,
         kernel_name=kernel_name,
@@ -66,11 +88,12 @@ def execute_notebook_events(
                 }
 
                 try:
-                    client.execute_cell(
+                    yield from _execute_cell_with_output_events(
+                        client,
                         cell,
                         notebook_index,
-                        execution_count=executable_index,
-                        store_history=True,
+                        executable_index=executable_index,
+                        total_cells=total_cells,
                     )
                 except Exception as exc:
                     if not isinstance(exc, CellExecutionError):
@@ -183,7 +206,7 @@ def _format_exception(exc: BaseException) -> str:
     return "".join(traceback_module.format_exception(exc))
 
 
-def _debug_info(debug: dict[str, Any] | None) -> dict[str, Any]:
+def _debug_info(debug: dict[str, Any] | None) -> DebugInfo:
     info = dict(debug or {})
     try:
         import modal
@@ -193,4 +216,91 @@ def _debug_info(debug: dict[str, Any] | None) -> dict[str, Any]:
     except Exception:
         info.setdefault("function_call_id", None)
         info.setdefault("input_id", None)
-    return info
+    return cast(DebugInfo, info)
+
+
+def _execute_cell_with_output_events(
+    client: StreamingNotebookClient,
+    cell: nbformat.NotebookNode,
+    notebook_index: int,
+    *,
+    executable_index: int,
+    total_cells: int,
+) -> Iterator[Event]:
+    event_queue: queue.Queue[Event | BaseException | object] = queue.Queue()
+    done = object()
+
+    def output_callback(output: nbformat.NotebookNode) -> None:
+        event = _cell_output_event(output, executable_index, notebook_index, total_cells)
+        if event is not None:
+            event_queue.put(event)
+
+    def run_cell() -> None:
+        client.runbook_output_callback = output_callback
+        try:
+            client.execute_cell(
+                cell,
+                notebook_index,
+                execution_count=executable_index,
+                store_history=True,
+            )
+        except BaseException as exc:
+            event_queue.put(exc)
+        finally:
+            client.runbook_output_callback = None
+            event_queue.put(done)
+
+    thread = threading.Thread(target=run_cell, daemon=True)
+    thread.start()
+    error: BaseException | None = None
+
+    while True:
+        item = event_queue.get()
+        if item is done:
+            break
+        if isinstance(item, BaseException):
+            error = item
+            continue
+        yield cast(Event, item)
+
+    thread.join()
+    if error is not None:
+        raise error
+
+
+def _cell_output_event(
+    output: nbformat.NotebookNode,
+    executable_index: int,
+    notebook_index: int,
+    total_cells: int,
+) -> Event | None:
+    output_type = str(output.get("output_type", ""))
+    event: dict[str, Any] = {
+        "event": "cell_output",
+        "cell": executable_index,
+        "notebook_cell": notebook_index + 1,
+        "total_cells": total_cells,
+        "output_type": output_type,
+    }
+
+    if output_type == "stream":
+        event["name"] = str(output.get("name", ""))
+        event["text"] = _truncate_output_text(str(output.get("text", "")))
+    elif output_type in {"display_data", "execute_result"}:
+        data = output.get("data", {})
+        if isinstance(data, dict) and "text/plain" in data:
+            event["text"] = _truncate_output_text(str(data["text/plain"]))
+    elif output_type == "error":
+        event["text"] = _truncate_output_text(
+            f"{output.get('ename', '')}: {output.get('evalue', '')}"
+        )
+
+    if "text" not in event:
+        return None
+    return cast(Event, event)
+
+
+def _truncate_output_text(text: str, *, max_chars: int = 4000) -> str:
+    if len(text) <= max_chars:
+        return text
+    return f"{text[: max_chars - 3]}..."

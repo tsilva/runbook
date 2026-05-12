@@ -103,6 +103,23 @@ def test_allow_errors_continues_after_error_and_preserves_traceback():
     assert notebook.cells[1].outputs[0].text.strip() == "after"
 
 
+def test_stream_outputs_are_reported_before_cell_finished():
+    events = _events(
+        _notebook_json(
+            nbformat.v4.new_code_cell("print('before')\nprint('after')")
+        )
+    )
+    event_names = [event["event"] for event in events]
+    output_index = event_names.index("cell_output")
+    finished_index = event_names.index("cell_finished")
+    output = events[output_index]
+
+    assert output_index < finished_index
+    assert output["output_type"] == "stream"
+    assert output["name"] == "stdout"
+    assert "before" in output["text"]
+
+
 def test_startup_failure_is_reported_distinctly():
     events = _events(
         _notebook_json(nbformat.v4.new_code_cell("print('never')")),
@@ -133,7 +150,7 @@ def test_non_cell_execution_exception_is_reported_as_cell_failure(monkeypatch):
         def execute_cell(self, *args, **kwargs):
             raise TimeoutError("cell timed out")
 
-    monkeypatch.setattr("runbook.execute.NotebookClient", FakeNotebookClient)
+    monkeypatch.setattr("runbook.execute.StreamingNotebookClient", FakeNotebookClient)
 
     events = _events(_notebook_json(nbformat.v4.new_code_cell("while True: pass")))
     failure = [event for event in events if event.get("event") == "cell_failed"][0]

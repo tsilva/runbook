@@ -13,7 +13,6 @@ from runbook.requirements_plan import (
     RuntimeRequirements,
 )
 
-
 runner = CliRunner()
 
 
@@ -33,7 +32,7 @@ def _write_input(path):
 def _patch_requirements(monkeypatch, requirements=None, *, generated=False):
     requirements = requirements or NotebookRequirements()
 
-    def fake_load_or_create(console, input_path, notebook_json, **kwargs):
+    def fake_load_or_create(console, log, input_path, notebook_json, **kwargs):
         return RequirementsLoadResult(
             path=input_path.with_name(f"{input_path.name}.yaml"),
             requirements=requirements,
@@ -81,9 +80,44 @@ def test_cli_success_writes_output_and_prints_modal_debug(monkeypatch, tmp_path)
 
     assert result.exit_code == 0, result.output
     assert output_path.exists()
+    assert "T+" in result.output
+    assert "Modal setup and image preparation in" in result.output
+    assert "Remote notebook execution in" in result.output
+    assert "Cell 1/1 started" in result.output
+    assert "Cell 1/1 finished in" in result.output
+    assert "Wrote notebook to" in result.output
     assert "function_call_id=fc-123" in result.output
     assert result.output.count("function_call_id=fc-123") == 2
     assert "Completed 1/1 executable cell" in result.output
+    written = nbformat.read(output_path, as_version=4)
+    assert written.metadata["runbook"]["status"] == "finished"
+    assert written.metadata["runbook"]["runtime"]["timeout"] == 3600
+    assert written.metadata["runbook"]["modal"]["debug"]["function_call_id"] == "fc-123"
+
+
+def test_cli_dry_run_preflights_without_remote_execution(monkeypatch, tmp_path):
+    input_path = tmp_path / "input.ipynb"
+    output_path = tmp_path / "runs" / "output.ipynb"
+    _write_input(input_path)
+    _patch_requirements(monkeypatch)
+
+    class FakePreflightReport:
+        checks = ["static plan ok"]
+        warnings = ["gpu shape warning"]
+
+    def fail_stream(notebook_json, options):
+        raise AssertionError("dry run should not start remote execution")
+
+    monkeypatch.setattr("runbook.cli.preflight_modal_run", lambda options: FakePreflightReport())
+    monkeypatch.setattr("runbook.cli.stream_remote_events", fail_stream)
+
+    result = runner.invoke(app, [str(input_path), "--output", str(output_path), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "Preflight: static plan ok" in result.output
+    assert "Preflight warning: gpu shape warning" in result.output
+    assert "Dry run complete; remote execution skipped." in result.output
+    assert not output_path.exists()
 
 
 def test_cli_cell_failure_writes_partial_and_exits_nonzero(monkeypatch, tmp_path):
@@ -311,6 +345,8 @@ def test_cli_prompts_for_openrouter_settings_and_writes_yaml(monkeypatch, tmp_pa
     assert result.exit_code == 0, result.output
     assert "Generating execution requirements with OpenRouter (openai/gpt-5.5)" in result.output
     assert "Wrote execution requirements" in result.output
+    assert "Starting remote execution on Modal (image=python:3.11, gpu=none)" in result.output
+    assert "Image setup can take a few minutes" in result.output
     assert input_path.with_name("input.ipynb.yaml").exists()
     assert (tmp_path / "config" / ".env").exists()
 
@@ -326,8 +362,8 @@ def test_modal_image_includes_build_toolchain():
             self.calls.append(("apt_install", packages))
             return self
 
-        def pip_install(self, *packages):
-            self.calls.append(("pip_install", packages))
+        def pip_install(self, *packages, **kwargs):
+            self.calls.append(("pip_install", packages, kwargs))
             return self
 
         def add_local_python_source(self, package):
@@ -356,7 +392,55 @@ def test_modal_image_includes_build_toolchain():
         "pytorch/pytorch:example",
         pip_packages=["torch", "nbformat"],
         apt_packages=["ffmpeg", "build-essential"],
+        python_version="3.12",
+        pip_index_url="https://example.test/simple",
+        pip_extra_index_urls=["https://extra.example.test/simple"],
     )
 
     assert ("apt_install", ("build-essential", "ffmpeg")) in image.calls
-    assert ("pip_install", ("nbformat", "nbclient", "ipykernel", "torch")) in image.calls
+    assert (
+        "pip_install",
+        ("nbformat", "nbclient", "ipykernel", "torch"),
+        {
+            "index_url": "https://example.test/simple",
+            "extra_index_url": ["https://extra.example.test/simple"],
+        },
+    ) in image.calls
+
+
+def test_cli_runtime_flags_reach_modal_options(monkeypatch, tmp_path):
+    input_path = tmp_path / "input.ipynb"
+    output_path = tmp_path / "output.ipynb"
+    notebook = _write_input(input_path)
+    _patch_requirements(monkeypatch)
+
+    def fake_stream(notebook_json, options):
+        assert options.python_version == "3.12"
+        assert options.build_toolchain is False
+        assert options.pip_index_url == "https://example.test/simple"
+        assert options.pip_extra_index_urls == ["https://extra.example.test/simple"]
+        assert options.workdir.startswith("/tmp/runbook-")
+        yield {"event": "started", "total_cells": 1, "debug": {}}
+        yield {"event": "finished", "completed": 1, "total_cells": 1}
+        yield {"event": "notebook", "format": "ipynb-json", "data": nbformat.writes(notebook)}
+
+    monkeypatch.setattr("runbook.cli.stream_remote_events", fake_stream)
+
+    result = runner.invoke(
+        app,
+        [
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--python-version",
+            "3.12",
+            "--no-build-toolchain",
+            "--pip-index-url",
+            "https://example.test/simple",
+            "--pip-extra-index-url",
+            "https://extra.example.test/simple",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "workdir=/tmp/runbook-" in result.output

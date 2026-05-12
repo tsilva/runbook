@@ -1,0 +1,25 @@
+{
+  "created_at": "2026-05-12T15:21:41.056004+00:00",
+  "dataset_id": "HuggingFaceTB/smoltalk2",
+  "config": "SFT",
+  "seed": 3407,
+  "buffer_size": 10000,
+  "total_rows": 1000,
+  "preserve_rows": 700,
+  "restyle_rows": 300,
+  "buckets": {
+    "capability_magpie": 300,
+    "capability_rewrite": 150,
+    "capability_summarize": 100,
+    "capability_instruction_following": 100,
+    "capability_science": 50,
+    "restyle_magpie": 180,
+    "restyle_rewrite": 70,
+    "restyle_summarize": 50
+  },
+  "notes": [
+    "Rows with restyle=false should stay unchanged to preserve assistant behavior.",
+    "Rows with restyle=true are untransformed placeholders for style rewriting.",
+    "After rewriting, train on the same JSONL shape with the restyle metadata kept or dropped."
+  ]
+}

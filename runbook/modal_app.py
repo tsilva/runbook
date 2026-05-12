@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
-Event = dict[str, Any]
+from runbook.events import Event
 
 
 @dataclass(frozen=True)
@@ -20,10 +20,77 @@ class ModalRunOptions:
     apt_packages: list[str] = field(default_factory=list)
     allow_errors: bool = False
     kernel_name: str = "python3"
+    python_version: str = "3.11"
+    build_toolchain: bool = True
+    pip_index_url: str | None = None
+    pip_extra_index_urls: list[str] = field(default_factory=list)
+    workdir: str = "/tmp/runbook"
 
 
 class ModalSetupError(RuntimeError):
     """Raised when a Modal runner cannot be configured."""
+
+
+@dataclass(frozen=True)
+class ModalPreflightReport:
+    checks: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+def preflight_modal_run(options: ModalRunOptions) -> ModalPreflightReport:
+    """Validate local Modal configuration and the static execution plan."""
+
+    checks: list[str] = []
+    warnings: list[str] = []
+    try:
+        import modal
+    except Exception as exc:  # pragma: no cover - depends on environment
+        raise ModalSetupError(
+            "Modal is not installed. Install runbook with its dependencies and run "
+            "`python3 -m modal setup`."
+        ) from exc
+
+    _build_image(
+        modal,
+        options.image,
+        pip_packages=options.pip_packages,
+        apt_packages=options.apt_packages,
+        python_version=options.python_version,
+        build_toolchain=options.build_toolchain,
+        pip_index_url=options.pip_index_url,
+        pip_extra_index_urls=options.pip_extra_index_urls,
+    )
+    checks.append("Modal image definition can be constructed locally.")
+
+    if options.secrets:
+        for name in options.secrets:
+            if not name.strip():
+                raise ModalSetupError("Secret names cannot be empty.")
+            modal.Secret.from_name(name)
+        checks.append(f"Prepared {len(options.secrets)} Modal Secret reference(s).")
+    else:
+        checks.append("No Modal Secret references requested.")
+
+    if options.volumes:
+        _parse_volumes(modal, options.volumes)
+        checks.append(f"Prepared {len(options.volumes)} Modal Volume mount(s).")
+    else:
+        checks.append("No Modal Volume mounts requested.")
+
+    if options.gpu:
+        warning = _gpu_name_warning(options.gpu)
+        if warning:
+            warnings.append(warning)
+        else:
+            checks.append(f"GPU request {options.gpu!r} has a recognized shape.")
+    else:
+        checks.append("CPU execution selected.")
+
+    checks.append(
+        "Modal authentication and remote resource existence will be verified by Modal "
+        "when execution starts."
+    )
+    return ModalPreflightReport(checks=checks, warnings=warnings)
 
 
 def _runbook_remote_runner(
@@ -31,6 +98,7 @@ def _runbook_remote_runner(
     allow_errors: bool,
     cell_timeout: int,
     kernel_name: str,
+    workdir: str,
     debug: dict[str, Any],
 ):
     from runbook.execute import execute_notebook_events
@@ -41,6 +109,7 @@ def _runbook_remote_runner(
         timeout=cell_timeout,
         kernel_name=kernel_name,
         debug=debug,
+        workdir=workdir,
     )
 
 
@@ -63,6 +132,10 @@ def stream_remote_events(notebook_json: str, options: ModalRunOptions) -> Iterat
         options.image,
         pip_packages=options.pip_packages,
         apt_packages=options.apt_packages,
+        python_version=options.python_version,
+        build_toolchain=options.build_toolchain,
+        pip_index_url=options.pip_index_url,
+        pip_extra_index_urls=options.pip_extra_index_urls,
     )
     function_kwargs: dict[str, Any] = {
         "image": image,
@@ -91,9 +164,15 @@ def stream_remote_events(notebook_json: str, options: ModalRunOptions) -> Iterat
             "cpu": options.cpu,
             "memory": options.memory,
             "timeout": options.timeout,
-            "image": options.image or "modal.Image.debian_slim(python_version='3.11')",
+            "image": options.image
+            or f"modal.Image.debian_slim(python_version='{options.python_version}')",
             "pip_packages": options.pip_packages,
             "apt_packages": options.apt_packages,
+            "python_version": options.python_version,
+            "build_toolchain": options.build_toolchain,
+            "pip_index_url": options.pip_index_url,
+            "pip_extra_index_urls": options.pip_extra_index_urls,
+            "workdir": options.workdir,
             "secrets": options.secrets,
             "volumes": options.volumes,
         },
@@ -106,6 +185,7 @@ def stream_remote_events(notebook_json: str, options: ModalRunOptions) -> Iterat
                 options.allow_errors,
                 options.timeout,
                 options.kernel_name,
+                options.workdir,
                 debug,
             )
     except Exception as exc:  # pragma: no cover - Modal integration behavior
@@ -118,18 +198,26 @@ def _build_image(
     *,
     pip_packages: list[str] | None = None,
     apt_packages: list[str] | None = None,
+    python_version: str = "3.11",
+    build_toolchain: bool = True,
+    pip_index_url: str | None = None,
+    pip_extra_index_urls: list[str] | None = None,
 ) -> Any:
     if image_name:
         image = modal.Image.from_registry(image_name)
     else:
-        image = modal.Image.debian_slim(python_version="3.11")
-    apt = _dedupe(["build-essential", *(apt_packages or [])])
+        image = modal.Image.debian_slim(python_version=python_version)
+    base_apt = ["build-essential"] if build_toolchain else []
+    apt = _dedupe([*base_apt, *(apt_packages or [])])
     pip = _dedupe(["nbformat", "nbclient", "ipykernel", *(pip_packages or [])])
-    return (
-        image.apt_install(*apt)
-        .pip_install(*pip)
-        .add_local_python_source("runbook")
-    )
+    if apt:
+        image = image.apt_install(*apt)
+    pip_kwargs: dict[str, Any] = {}
+    if pip_index_url:
+        pip_kwargs["index_url"] = pip_index_url
+    if pip_extra_index_urls:
+        pip_kwargs["extra_index_url"] = pip_extra_index_urls
+    return image.pip_install(*pip, **pip_kwargs).add_local_python_source("runbook")
 
 
 def _dedupe(values: list[str]) -> list[str]:
@@ -156,3 +244,24 @@ def _parse_volumes(modal: Any, volume_specs: list[str]) -> dict[str, Any]:
             )
         volumes[mount_path] = modal.Volume.from_name(name)
     return volumes
+
+
+def _gpu_name_warning(gpu: str) -> str | None:
+    normalized = gpu.upper()
+    recognized_prefixes = (
+        "T4",
+        "L4",
+        "A10",
+        "A100",
+        "H100",
+        "H200",
+        "L40",
+        "L40S",
+        "B200",
+    )
+    if normalized.startswith(recognized_prefixes):
+        return None
+    return (
+        f"GPU request {gpu!r} is not one of Runbook's recognized Modal GPU shapes; "
+        "Modal may still accept it."
+    )

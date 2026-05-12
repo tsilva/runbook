@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from runbook.files import atomic_write_text
 from runbook.requirements_plan import DEFAULT_OPENROUTER_MODEL
 
 
@@ -48,12 +49,12 @@ def save_openrouter_settings(settings: OpenRouterSettings) -> None:
         "RUNBOOK_OPENROUTER_MODEL": settings.model or DEFAULT_OPENROUTER_MODEL,
     }
     path = runbook_env_path()
-    path.write_text(
+    atomic_write_text(
+        path,
         "\n".join(f"{key}={_escape_env_value(value)}" for key, value in values.items())
         + "\n",
-        encoding="utf-8",
+        mode=0o600,
     )
-    path.chmod(0o600)
 
 
 def _read_env_file(path: Path) -> dict[str, str]:

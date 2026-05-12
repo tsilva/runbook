@@ -34,6 +34,9 @@ runbook analysis.py --output runs/analysis.ipynb
 runbook input.ipynb --cpu 4 --memory 16384 --secret huggingface-token
 runbook input.ipynb --volume model-cache:/models --kernel-name python3
 runbook input.ipynb --allow-errors
+runbook input.ipynb --regenerate-requirements
+runbook input.ipynb --dry-run
+runbook input.ipynb --python-version 3.12 --no-build-toolchain
 python3 -m pytest  # run tests from a dev environment with pytest installed
 ```
 
@@ -52,7 +55,9 @@ settings needed for remote execution. On first run, Runbook initializes
 `~/.config/runbook`, prompts for an OpenRouter API key and model, and stores
 them in `~/.config/runbook/.env`. The default model is `openai/gpt-5.5`.
 Later runs reuse the saved YAML file and do not call the model unless the file
-is deleted. CLI flags override values from the YAML file.
+is deleted or `--regenerate-requirements` is passed. Generated YAML records a
+source hash, so Runbook can reject stale requirements after the notebook changes.
+CLI flags override values from the YAML file.
 
 If you skip the OpenRouter API key prompt and no companion YAML exists, Runbook
 will not generate one. In that mode, pass `--image` and any needed package flags
@@ -73,12 +78,19 @@ runbook input.ipynb --image python:3.11 --pip-package pandas --apt-package git
   notebook, and exits nonzero.
 - `--allow-errors` continues after cell errors and writes a completed notebook
   containing those errors.
+- `--dry-run` resolves requirements and performs local preflight validation for
+  the output path, Modal image definition, GPU request shape, secret references,
+  and volume mount specs without executing the notebook.
+- Executed notebooks include `metadata.runbook` with the resolved runtime,
+  packages, Modal attachments, planner metadata, run status, and cell counts.
+- Stdout/stderr and simple text display outputs are streamed while each cell is
+  running, in addition to being preserved in the written notebook.
 - The local notebook is uploaded as notebook JSON. Additional local data files
   are not uploaded; use Modal Volumes or bake data into the selected image.
 - `--image` accepts a public registry image and adds Runbook's notebook
   execution dependencies plus packages from the companion YAML file.
-- Live intra-cell stdout streaming is not implemented; stdout/stderr are
-  captured in the output notebook.
+- `--python-version`, `--build-toolchain/--no-build-toolchain`,
+  `--pip-index-url`, and `--pip-extra-index-url` customize Modal image setup.
 
 ## Architecture
 

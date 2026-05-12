@@ -21,7 +21,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest"]
+test = [
+  "mypy",
+  "pytest",
+  "ruff",
+  "types-PyYAML",
+]
 
 [project.scripts]
 runbook = "runbook.cli:app"
@@ -34,3 +39,18 @@ markers = [
   "modal_integration: runs a real notebook on Modal and requires Modal credentials",
 ]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["examples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+disable_error_code = ["import-untyped"]
+warn_unused_ignores = true
+check_untyped_defs = true

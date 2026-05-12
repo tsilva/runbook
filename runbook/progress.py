@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 
 from rich.console import Console
@@ -22,11 +23,16 @@ class NotebookProgress:
         )
         self._task_id: TaskID | None = None
 
-    def __enter__(self) -> "NotebookProgress":
+    def __enter__(self) -> NotebookProgress:
         self._progress.__enter__()
         return self
 
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         self._progress.__exit__(exc_type, exc, tb)
 
     def start(self, total_cells: int) -> None:
