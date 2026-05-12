@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -62,7 +63,7 @@ def main(
     input_path: Annotated[Path, typer.Argument(help="Input .ipynb or Jupytext .py file.")],
     output: Annotated[
         Path | None,
-        typer.Option("--output", "-o", help="Output executed .ipynb path."),
+        typer.Option("--output", "-o", help="Output notebook base path."),
     ] = None,
     gpu: Annotated[
         str | None,
@@ -111,8 +112,9 @@ def main(
     regenerate_requirements: Annotated[
         bool,
         typer.Option(
+            "--generate-requirements",
             "--regenerate-requirements",
-            help="Regenerate the companion requirements file even if one exists.",
+            help="Generate the companion requirements file with the configured LLM.",
         ),
     ] = False,
     python_version: Annotated[
@@ -157,7 +159,7 @@ def main(
         typer.Option("--jsonl", help="Emit machine-readable JSON Lines output."),
     ] = False,
 ) -> None:
-    """Execute a notebook remotely on Modal and write an executed .ipynb."""
+    """Execute a notebook remotely on Modal and write .running/.finished notebooks."""
 
     mode = _resolve_output_mode(verbose=verbose, plain=plain, jsonl=jsonl)
     console = Console(stderr=True, no_color=mode in {"plain", "jsonl"}, soft_wrap=mode == "jsonl")
@@ -214,7 +216,10 @@ def main(
         log.info("Using CLI-provided execution requirements.")
     _print_requirements_plan(console, log, requirements_result, mode=mode)
 
-    output_path = (output or default_output_path(converted.source_path)).expanduser().resolve()
+    requested_output_path = (
+        output or default_output_path(converted.source_path)
+    ).expanduser().resolve()
+    running_output_path, finished_output_path = _run_output_paths(requested_output_path)
     options_started = perf_counter()
     options = _merge_options(
         requirements_result.requirements,
@@ -238,7 +243,7 @@ def main(
 
     preflight_started = perf_counter()
     try:
-        _run_preflight(log, output_path, options)
+        _run_preflight(log, [running_output_path, finished_output_path], options)
     except ModalSetupError as exc:
         log.done("Preflight failed", preflight_started)
         _print_error(console, f"Preflight failed: {exc}", mode=mode)
@@ -253,15 +258,16 @@ def main(
 
     live_notebook = LiveNotebookWriter(
         converted.notebook_json,
-        output_path,
+        running_output_path,
+        final_output_path=finished_output_path,
         requirements_result=requirements_result,
         options=options,
     )
     live_notebook.write(status="pending", completed=0, total_cells=0, debug=None)
     log.info(
-        f"Initialized live output notebook at {output_path}.",
+        f"Initialized live output notebook at {running_output_path}.",
         event="live_notebook_initialized",
-        output_path=str(output_path),
+        output_path=str(running_output_path),
     )
 
     notebook_data: str | None = None
@@ -437,7 +443,16 @@ def main(
     except ModalSetupError as exc:
         if not modal_setup_reported:
             log.done("Modal setup failed", modal_setup_started, event="modal_setup_failed")
-        _write_notebook_if_available(output_path, notebook_data, log, partial=True)
+        if notebook_data is None:
+            live_notebook.finalize_current(
+                status="failed",
+                completed=completed,
+                total_cells=total_cells,
+                debug=debug,
+            )
+        else:
+            _write_notebook_if_available(finished_output_path, notebook_data, log, partial=True)
+            _delete_running_output(running_output_path, log)
         _print_error(console, f"Modal setup/execution failed: {exc}", mode=mode)
         if debug:
             print_debug_info(console, "Modal run", debug, mode=mode)
@@ -449,7 +464,16 @@ def main(
                 modal_setup_started,
                 event="remote_execution_failed_before_event",
             )
-        _write_notebook_if_available(output_path, notebook_data, log, partial=True)
+        if notebook_data is None:
+            live_notebook.finalize_current(
+                status="failed",
+                completed=completed,
+                total_cells=total_cells,
+                debug=debug,
+            )
+        else:
+            _write_notebook_if_available(finished_output_path, notebook_data, log, partial=True)
+            _delete_running_output(running_output_path, log)
         _print_error(console, f"Remote execution failed: {exc}", mode=mode)
         if debug:
             print_debug_info(console, "Modal run", debug, mode=mode)
@@ -462,10 +486,23 @@ def main(
             event="modal_setup_ended_without_events",
         )
 
-    wrote_output = _write_notebook_if_available(output_path, notebook_data, log)
-    if not wrote_output and output_path.exists():
+    if notebook_data is None:
+        live_notebook.finalize_current(
+            status=_notebook_status(
+                finished=finished,
+                failure=failure,
+                startup_failure=startup_failure,
+            ),
+            completed=completed,
+            total_cells=total_cells,
+            debug=debug,
+        )
+    wrote_output = _write_notebook_if_available(finished_output_path, notebook_data, log)
+    if wrote_output:
+        _delete_running_output(running_output_path, log)
+    if not wrote_output and finished_output_path.exists():
         wrote_output = True
-    written_path = output_path if wrote_output else None
+    written_path = finished_output_path if wrote_output else None
 
     if startup_failure is not None:
         print_startup_failure_summary(console, written_path, startup_failure, debug, mode=mode)
@@ -595,6 +632,39 @@ def _load_or_create_requirements(
         log.done("Execution requirements loaded", started)
         return result
 
+    if not regenerate_requirements:
+        if not image:
+            raise RequirementsConfigError(
+                _missing_requirements_message(input_path, requirements_path)
+            )
+        log.info("No config generation needed; using CLI-provided execution requirements.")
+        return RequirementsLoadResult(
+            path=requirements_path,
+            requirements=NotebookRequirements(
+                runtime=RuntimeRequirements(
+                    image=image,
+                    gpu=gpu,
+                    cpu=cpu,
+                    memory=memory,
+                    timeout=timeout or DEFAULT_TIMEOUT,
+                    kernel_name=kernel_name or DEFAULT_KERNEL_NAME,
+                    python_version=python_version or DEFAULT_PYTHON_VERSION,
+                    build_toolchain=True if build_toolchain is None else build_toolchain,
+                    pip_index_url=pip_index_url,
+                    pip_extra_index_urls=pip_extra_index_urls or [],
+                ),
+                packages=PackageRequirements(
+                    pip=pip_packages or [],
+                    apt=apt_packages or [],
+                ),
+                modal=ModalRequirements(
+                    secrets=secrets or [],
+                    volumes=volumes or [],
+                ),
+            ),
+            generated=False,
+        )
+
     settings_started = perf_counter()
     settings = _load_or_prompt_openrouter_settings(console)
     log.done("OpenRouter settings resolved", settings_started)
@@ -613,39 +683,23 @@ def _load_or_create_requirements(
         log.done("Execution requirements generated", started)
         return result
 
-    if not image:
-        raise RequirementsConfigError(
-            "No companion requirements file exists and OpenRouter settings were "
-            "not provided. Pass --image to run without generating requirements, "
-            "plus --gpu/--pip-package/--apt-package as needed."
-        )
+    raise RequirementsConfigError(
+        "OpenRouter settings were not provided, so Runbook could not generate "
+        f"{requirements_path}. Pass --image and any needed package flags to run "
+        "without a companion requirements file."
+    )
 
-    log.info("No config generation needed; using CLI-provided execution requirements.")
-    return RequirementsLoadResult(
-        path=requirements_path,
-        requirements=NotebookRequirements(
-            runtime=RuntimeRequirements(
-                image=image,
-                gpu=gpu,
-                cpu=cpu,
-                memory=memory,
-                timeout=timeout or DEFAULT_TIMEOUT,
-                kernel_name=kernel_name or DEFAULT_KERNEL_NAME,
-                python_version=python_version or DEFAULT_PYTHON_VERSION,
-                build_toolchain=True if build_toolchain is None else build_toolchain,
-                pip_index_url=pip_index_url,
-                pip_extra_index_urls=pip_extra_index_urls or [],
-            ),
-            packages=PackageRequirements(
-                pip=pip_packages or [],
-                apt=apt_packages or [],
-            ),
-            modal=ModalRequirements(
-                secrets=secrets or [],
-                volumes=volumes or [],
-            ),
-        ),
-        generated=False,
+
+def _missing_requirements_message(input_path: Path, requirements_path: Path) -> str:
+    command = (
+        f"runbook {shlex.quote(str(input_path))} --generate-requirements --dry-run"
+    )
+    return (
+        f"Companion requirements file does not exist: {requirements_path}\n"
+        "Runbook will not call the LLM automatically. To generate it with the "
+        f"configured LLM, run:\n\n  {command}\n\n"
+        "To run without a companion requirements file, pass --image plus any "
+        "needed --gpu/--pip-package/--apt-package flags."
     )
 
 
@@ -706,9 +760,10 @@ def _print_remote_execution_start(
     )
 
 
-def _run_preflight(log: TerminalLog, output_path: Path, options: ModalRunOptions) -> None:
-    _preflight_output_path(output_path)
-    log.info(f"Output path is writable or creatable: {output_path}.")
+def _run_preflight(log: TerminalLog, output_paths: list[Path], options: ModalRunOptions) -> None:
+    for output_path in output_paths:
+        _preflight_output_path(output_path)
+        log.info(f"Output path is writable or creatable: {output_path}.")
     report = preflight_modal_run(options)
     for check in report.checks:
         log.info(f"Preflight: {check}")
@@ -907,13 +962,15 @@ class LiveNotebookWriter:
     def __init__(
         self,
         notebook_json: str,
-        output_path: Path,
+        running_output_path: Path,
         *,
+        final_output_path: Path,
         requirements_result: RequirementsLoadResult,
         options: ModalRunOptions,
     ) -> None:
         self._notebook = nbformat.reads(notebook_json, as_version=4)
-        self._output_path = output_path
+        self._running_output_path = running_output_path
+        self._final_output_path = final_output_path
         self._requirements_result = requirements_result
         self._options = options
         self._clear_outputs()
@@ -936,7 +993,7 @@ class LiveNotebookWriter:
             current_cell=current_cell,
             current_notebook_cell=current_notebook_cell,
         )
-        atomic_write_text(self._output_path, nbformat.writes(self._notebook))
+        atomic_write_text(self._running_output_path, nbformat.writes(self._notebook))
 
     def cell_started(
         self,
@@ -1062,7 +1119,33 @@ class LiveNotebookWriter:
 
     def replace_with_final(self, notebook_json: str) -> None:
         self._notebook = nbformat.reads(notebook_json, as_version=4)
-        atomic_write_text(self._output_path, notebook_json)
+        atomic_write_text(self._final_output_path, notebook_json)
+        try:
+            self._running_output_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def finalize_current(
+        self,
+        *,
+        status: str,
+        completed: int,
+        total_cells: int,
+        debug: dict | None,
+    ) -> None:
+        self._set_metadata(
+            status=status,
+            completed=completed,
+            total_cells=total_cells,
+            debug=debug,
+            current_cell=None,
+            current_notebook_cell=None,
+        )
+        atomic_write_text(self._final_output_path, nbformat.writes(self._notebook))
+        try:
+            self._running_output_path.unlink()
+        except FileNotFoundError:
+            pass
 
     def _clear_outputs(self) -> None:
         for index, cell in enumerate(self._notebook.cells, start=1):
@@ -1227,6 +1310,31 @@ def _write_notebook_if_available(
             f"{_format_duration(perf_counter() - started)} ({size})."
         )
     return True
+
+
+def _run_output_paths(requested_output_path: Path) -> tuple[Path, Path]:
+    base = _output_base_path(requested_output_path)
+    return (
+        base.with_name(f"{base.name}.running.ipynb"),
+        base.with_name(f"{base.name}.finished.ipynb"),
+    )
+
+
+def _output_base_path(path: Path) -> Path:
+    name = path.name
+    for suffix in (".running.ipynb", ".finished.ipynb", ".executed.ipynb", ".ipynb"):
+        if name.endswith(suffix):
+            return path.with_name(name[: -len(suffix)])
+    return path.with_suffix("")
+
+
+def _delete_running_output(path: Path, log: TerminalLog | None = None) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    if log is not None:
+        log.info(f"Deleted live output notebook {path}.", event="live_notebook_deleted")
 
 
 class TerminalLog:

@@ -5,8 +5,10 @@
 </div>
 
 Runbook is a Python CLI that runs a local Jupyter notebook remotely on Modal and
-writes the executed `.ipynb` back to disk. It supports native `.ipynb` files and
-Jupytext `.py` percent notebooks.
+writes notebook artifacts back to disk. While execution is active, outputs stream
+into a `.running.ipynb` file. When the run ends, Runbook writes a
+`.finished.ipynb` file and removes the `.running.ipynb` file. It supports native
+`.ipynb` files and Jupytext `.py` percent notebooks.
 
 Use it when a notebook needs Modal resources such as GPUs, larger CPU or memory
 requests, secrets, volumes, or a custom registry image.
@@ -34,7 +36,8 @@ runbook analysis.py --output runs/analysis.ipynb
 runbook input.ipynb --cpu 4 --memory 16384 --secret huggingface-token
 runbook input.ipynb --volume model-cache:/models --kernel-name python3
 runbook input.ipynb --allow-errors
-runbook input.ipynb --regenerate-requirements
+runbook input.ipynb --generate-requirements --dry-run
+runbook input.ipynb --regenerate-requirements --dry-run
 runbook input.ipynb --dry-run
 runbook input.ipynb --python-version 3.12 --no-build-toolchain
 python3 -m pytest  # run tests from a dev environment with pytest installed
@@ -42,25 +45,30 @@ python3 -m pytest  # run tests from a dev environment with pytest installed
 
 CPU execution is the default when `--gpu` is omitted.
 
-On the first run, Runbook creates a companion execution requirements file next
-to the notebook:
+Runbook expects a companion execution requirements file next to the notebook:
 
 ```text
 input.ipynb.yaml
 ```
 
-If that file is missing, Runbook sends a full Jupytext dump of the notebook to
-OpenRouter and asks a model to infer the Modal image, GPU, packages, and runtime
-settings needed for remote execution. On first run, Runbook initializes
-`~/.config/runbook`, prompts for an OpenRouter API key and model, and stores
-them in `~/.config/runbook/.env`. The default model is `openai/gpt-5.5`.
-Later runs reuse the saved YAML file and do not call the model unless the file
-is deleted or `--regenerate-requirements` is passed. Generated YAML records a
-source hash, so Runbook can reject stale requirements after the notebook changes.
-CLI flags override values from the YAML file.
+If that file is missing, Runbook warns and exits without calling OpenRouter. The
+warning includes the command to generate the file with the configured LLM:
 
-If you skip the OpenRouter API key prompt and no companion YAML exists, Runbook
-will not generate one. In that mode, pass `--image` and any needed package flags
+```bash
+runbook input.ipynb --generate-requirements --dry-run
+```
+
+When generation is explicitly requested, Runbook sends a full Jupytext dump of
+the notebook to OpenRouter and asks a model to infer the Modal image, GPU,
+packages, and runtime settings needed for remote execution. Runbook initializes
+`~/.config/runbook`, prompts for an OpenRouter API key and model when needed,
+and stores them in `~/.config/runbook/.env`. The default model is
+`openai/gpt-5.5`. Later runs reuse the saved YAML file and do not call the model
+unless `--generate-requirements` or `--regenerate-requirements` is passed.
+Generated YAML records a source hash, so Runbook can reject stale requirements
+after the notebook changes. CLI flags override values from the YAML file.
+
+To run without a companion YAML, pass `--image` and any needed package flags
 manually:
 
 ```bash
@@ -74,6 +82,9 @@ runbook input.ipynb --image python:3.11 --pip-package pandas --apt-package git
   persists between cells.
 - Cell outputs, rich display outputs, stdout/stderr, and tracebacks are
   preserved in the written notebook.
+- During execution, Runbook writes live cell outputs and the current-cell pointer
+  to `<output-base>.running.ipynb`; at the end it writes
+  `<output-base>.finished.ipynb` and deletes the running file.
 - By default, execution stops at the first cell error, writes the partial
   notebook, and exits nonzero.
 - `--allow-errors` continues after cell errors and writes a completed notebook

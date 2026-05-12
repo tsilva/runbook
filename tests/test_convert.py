@@ -16,7 +16,7 @@ def test_reads_ipynb(tmp_path):
     parsed = nbformat.reads(converted.notebook_json, as_version=4)
 
     assert parsed.cells[0].source == "print('hello')"
-    assert default_output_path(path).name == "input.executed.ipynb"
+    assert default_output_path(path).name == "input.finished.ipynb"
 
 
 def test_reads_jupytext_percent(tmp_path):

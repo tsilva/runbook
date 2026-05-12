@@ -53,6 +53,6 @@ def read_notebook(path: Path) -> ConvertedNotebook:
 
 
 def default_output_path(input_path: Path) -> Path:
-    """Return the default executed ipynb path for an input notebook."""
+    """Return the default finished ipynb path for an input notebook."""
 
-    return input_path.with_name(f"{input_path.stem}.executed.ipynb")
+    return input_path.with_name(f"{input_path.stem}.finished.ipynb")

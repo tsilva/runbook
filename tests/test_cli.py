@@ -31,6 +31,14 @@ def _write_input(path):
     return notebook
 
 
+def _finished_path(path):
+    return path.with_name(f"{path.stem}.finished.ipynb")
+
+
+def _running_path(path):
+    return path.with_name(f"{path.stem}.running.ipynb")
+
+
 def _patch_requirements(monkeypatch, requirements=None, *, generated=False):
     requirements = requirements or NotebookRequirements()
 
@@ -81,7 +89,7 @@ def test_cli_success_writes_output_and_prints_modal_debug(monkeypatch, tmp_path)
     result = runner.invoke(app, [str(input_path), "--output", str(output_path)])
 
     assert result.exit_code == 0, result.output
-    assert output_path.exists()
+    assert _finished_path(output_path).exists()
     assert "T+" in result.output
     assert "Modal setup and image preparation in" in result.output
     assert "Remote notebook execution in" in result.output
@@ -91,7 +99,7 @@ def test_cli_success_writes_output_and_prints_modal_debug(monkeypatch, tmp_path)
     assert "function_call_id=fc-123" in result.output
     assert result.output.count("function_call_id=fc-123") == 2
     assert "Completed 1/1 executable cell" in result.output
-    written = nbformat.read(output_path, as_version=4)
+    written = nbformat.read(_finished_path(output_path), as_version=4)
     assert written.metadata["runbook"]["status"] == "finished"
     assert written.metadata["runbook"]["runtime"]["timeout"] == 3600
     assert written.metadata["runbook"]["modal"]["debug"]["function_call_id"] == "fc-123"
@@ -119,7 +127,7 @@ def test_cli_dry_run_preflights_without_remote_execution(monkeypatch, tmp_path):
     assert "Preflight: static plan ok" in result.output
     assert "Preflight warning: gpu shape warning" in result.output
     assert "Dry run complete; remote execution skipped." in result.output
-    assert not output_path.exists()
+    assert not _finished_path(output_path).exists()
 
 
 def test_cli_plain_output_avoids_rich_panels(monkeypatch, tmp_path):
@@ -185,7 +193,7 @@ def test_cli_jsonl_output_is_machine_readable(monkeypatch, tmp_path):
     assert "cell_output" in events
     assert "run_finished" in events
     assert all(line.startswith("{") for line in result.output.splitlines() if line.strip())
-    assert output_path.exists()
+    assert _finished_path(output_path).exists()
 
 
 def test_cli_streams_live_notebook_updates(monkeypatch, tmp_path):
@@ -207,7 +215,7 @@ def test_cli_streams_live_notebook_updates(monkeypatch, tmp_path):
     _patch_requirements(monkeypatch)
 
     def read_live():
-        return nbformat.read(output_path, as_version=4)
+        return nbformat.read(_running_path(output_path), as_version=4)
 
     def fake_stream(notebook_json, options):
         yield {"event": "started", "total_cells": 1, "debug": {}}
@@ -262,9 +270,11 @@ def test_cli_streams_live_notebook_updates(monkeypatch, tmp_path):
     result = runner.invoke(app, [str(input_path), "--output", str(output_path)])
 
     assert result.exit_code == 0, result.output
-    written = nbformat.read(output_path, as_version=4)
+    written = nbformat.read(_finished_path(output_path), as_version=4)
     assert written.cells[0].outputs[0].text == "live\n"
     assert written.metadata["runbook"]["status"] == "finished"
+    assert _finished_path(output_path).exists()
+    assert not _running_path(output_path).exists()
 
 
 def test_cli_cell_failure_writes_partial_and_exits_nonzero(monkeypatch, tmp_path):
@@ -297,7 +307,7 @@ def test_cli_cell_failure_writes_partial_and_exits_nonzero(monkeypatch, tmp_path
     result = runner.invoke(app, [str(input_path), "--output", str(output_path)])
 
     assert result.exit_code != 0
-    assert output_path.exists()
+    assert _finished_path(output_path).exists()
     assert "Failed at executable cell 1/1" in result.output
     assert "ValueError: bad" in result.output
 
@@ -384,7 +394,7 @@ def test_cli_merges_requirements_with_flag_overrides(monkeypatch, tmp_path):
     )
 
     assert result.exit_code == 0, result.output
-    assert output_path.exists()
+    assert _finished_path(output_path).exists()
 
 
 def test_cli_without_llm_requires_image_for_manual_settings(monkeypatch, tmp_path):
@@ -394,11 +404,14 @@ def test_cli_without_llm_requires_image_for_manual_settings(monkeypatch, tmp_pat
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("RUNBOOK_OPENROUTER_MODEL", raising=False)
 
-    result = runner.invoke(app, [str(input_path)], input="\n")
+    result = runner.invoke(app, [str(input_path)])
 
     assert result.exit_code != 0
-    assert "Pass --image to run without generating" in result.output
-    assert "requirements" in result.output
+    assert "Companion requirements file does not exist" in result.output
+    assert "runbook" in result.output
+    assert "--generate-requirements" in result.output
+    assert "--dry-run" in result.output
+    assert "Runbook will not call the LLM automatically" in result.output
     assert not input_path.with_name("input.ipynb.yaml").exists()
 
 
@@ -438,7 +451,7 @@ def test_cli_without_llm_uses_manual_flag_settings(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "Using CLI-provided execution requirements" in result.output
-    assert output_path.exists()
+    assert _finished_path(output_path).exists()
     assert not input_path.with_name("input.ipynb.yaml").exists()
 
 
@@ -486,6 +499,60 @@ def test_cli_prompts_for_openrouter_settings_and_writes_yaml(monkeypatch, tmp_pa
     result = runner.invoke(
         app,
         [str(input_path), "--output", str(output_path)],
+        input="sk-test\n\n",
+    )
+
+    assert result.exit_code != 0
+    assert "Companion requirements file does not exist" in result.output
+    assert "OpenRouter API key" not in result.output
+    assert not input_path.with_name("input.ipynb.yaml").exists()
+    assert not _finished_path(output_path).exists()
+
+
+def test_cli_generate_requirements_flag_prompts_and_writes_yaml(monkeypatch, tmp_path):
+    input_path = tmp_path / "input.ipynb"
+    output_path = tmp_path / "output.ipynb"
+    notebook = _write_input(input_path)
+    monkeypatch.setenv("RUNBOOK_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("RUNBOOK_OPENROUTER_MODEL", raising=False)
+
+    def fake_openrouter(notebook_text, model, *, api_key=None):
+        assert api_key == "sk-test"
+        assert model == "openai/gpt-5.5"
+        return {
+            "version": 1,
+            "runtime": {
+                "image": "python:3.11",
+                "gpu": None,
+                "cpu": None,
+                "memory": None,
+                "timeout": 3600,
+                "kernel_name": "python3",
+            },
+            "packages": {"pip": [], "apt": []},
+            "modal": {"secrets": [], "volumes": []},
+            "planner": {
+                "provider": "openrouter",
+                "model": "openai/gpt-5.5",
+                "generated_at": None,
+                "confidence": 0.7,
+                "notes": [],
+            },
+        }
+
+    def fake_stream(notebook_json, options):
+        assert options.image == "python:3.11"
+        yield {"event": "started", "total_cells": 1, "debug": {}}
+        yield {"event": "finished", "completed": 1, "total_cells": 1}
+        yield {"event": "notebook", "format": "ipynb-json", "data": nbformat.writes(notebook)}
+
+    monkeypatch.setattr("runbook.requirements_plan._call_openrouter", fake_openrouter)
+    monkeypatch.setattr("runbook.cli.stream_remote_events", fake_stream)
+
+    result = runner.invoke(
+        app,
+        [str(input_path), "--output", str(output_path), "--generate-requirements"],
         input="sk-test\n\n",
     )
 
