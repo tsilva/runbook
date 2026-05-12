@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import nbformat
 import pytest
 from typer.testing import CliRunner
@@ -118,6 +120,72 @@ def test_cli_dry_run_preflights_without_remote_execution(monkeypatch, tmp_path):
     assert "Preflight warning: gpu shape warning" in result.output
     assert "Dry run complete; remote execution skipped." in result.output
     assert not output_path.exists()
+
+
+def test_cli_plain_output_avoids_rich_panels(monkeypatch, tmp_path):
+    input_path = tmp_path / "input.ipynb"
+    output_path = tmp_path / "output.ipynb"
+    notebook = _write_input(input_path)
+    _patch_requirements(monkeypatch)
+
+    def fake_stream(notebook_json, options):
+        yield {"event": "started", "total_cells": 1, "debug": {}}
+        yield {"event": "finished", "completed": 1, "total_cells": 1}
+        yield {"event": "notebook", "format": "ipynb-json", "data": nbformat.writes(notebook)}
+
+    monkeypatch.setattr("runbook.cli.stream_remote_events", fake_stream)
+
+    result = runner.invoke(app, [str(input_path), "--output", str(output_path), "--plain"])
+
+    assert result.exit_code == 0, result.output
+    assert "T+" in result.output
+    assert "Completed 1/1 executable cell" in result.output
+    assert "╭" not in result.output
+
+
+def test_cli_jsonl_output_is_machine_readable(monkeypatch, tmp_path):
+    input_path = tmp_path / "input.ipynb"
+    output_path = tmp_path / "output.ipynb"
+    notebook = _write_input(input_path)
+    _patch_requirements(monkeypatch)
+
+    def fake_stream(notebook_json, options):
+        yield {
+            "event": "started",
+            "total_cells": 1,
+            "debug": {"app_name": "runbook", "function_call_id": "fc-json"},
+        }
+        yield {
+            "event": "cell_started",
+            "cell": 1,
+            "notebook_cell": 1,
+            "total_cells": 1,
+            "source_preview": "print('hello')",
+        }
+        yield {
+            "event": "cell_output",
+            "cell": 1,
+            "notebook_cell": 1,
+            "total_cells": 1,
+            "name": "stdout",
+            "text": "hello\n",
+        }
+        yield {"event": "cell_finished", "cell": 1, "completed": 1, "total_cells": 1}
+        yield {"event": "finished", "completed": 1, "total_cells": 1}
+        yield {"event": "notebook", "format": "ipynb-json", "data": nbformat.writes(notebook)}
+
+    monkeypatch.setattr("runbook.cli.stream_remote_events", fake_stream)
+
+    result = runner.invoke(app, [str(input_path), "--output", str(output_path), "--jsonl"])
+
+    assert result.exit_code == 0, result.output
+    records = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+    events = [record["event"] for record in records]
+    assert "run_started" in events
+    assert "cell_output" in events
+    assert "run_finished" in events
+    assert all(line.startswith("{") for line in result.output.splitlines() if line.strip())
+    assert output_path.exists()
 
 
 def test_cli_cell_failure_writes_partial_and_exits_nonzero(monkeypatch, tmp_path):

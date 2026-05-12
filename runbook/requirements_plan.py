@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,18 @@ DEFAULT_OPENROUTER_TIMEOUT_SECONDS = 120
 DEFAULT_OPENROUTER_MAX_NOTEBOOK_CHARS = 200_000
 OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
 RequirementsPlanner = Callable[[str, str, str | None], dict[str, Any]]
+BUILD_TOOLCHAIN_PIP_PACKAGES = {
+    "bitsandbytes",
+    "deepspeed",
+    "flash-attn",
+    "flash-attn-2",
+    "flash-attn-3",
+    "liger-kernel",
+    "triton",
+    "unsloth",
+    "unsloth-zoo",
+    "xformers",
+}
 
 
 @dataclass(frozen=True)
@@ -226,6 +239,8 @@ def parse_requirements(raw: Any, *, source: str) -> NotebookRequirements:
         pip=_string_list(packages_raw.get("pip"), "packages.pip"),
         apt=_string_list(packages_raw.get("apt"), "packages.apt"),
     )
+    if _pip_packages_need_build_toolchain(packages.pip):
+        runtime = replace(runtime, build_toolchain=True)
     modal = ModalRequirements(
         secrets=_string_list(modal_raw.get("secrets"), "modal.secrets"),
         volumes=_string_list(modal_raw.get("volumes"), "modal.volumes"),
@@ -400,6 +415,9 @@ def _call_openrouter(
                     "volumes, private images, or credentials. Prefer a public base "
                     "image and explicit pip/apt packages that are sufficient for the "
                     "notebook to run. Use null when a resource is not needed. Set "
+                    "runtime.build_toolchain to true when packages may compile native "
+                    "or CUDA code at install or runtime, including Triton, Unsloth, "
+                    "xFormers, bitsandbytes, flash-attn, or DeepSpeed. Set "
                     "planner.source_hash to null; Runbook fills it locally."
                 ),
             },
@@ -709,6 +727,21 @@ def _dedupe(values: list[str]) -> list[str]:
             seen.add(value)
             result.append(value)
     return result
+
+
+def _pip_packages_need_build_toolchain(packages: list[str]) -> bool:
+    return any(
+        _normalized_pip_package_name(package) in BUILD_TOOLCHAIN_PIP_PACKAGES
+        for package in packages
+    )
+
+
+def _normalized_pip_package_name(package: str) -> str:
+    name = package.strip()
+    if "://" in name:
+        return ""
+    name = re.split(r"\s*(?:\[|==|!=|~=|>=|<=|>|<|;)", name, maxsplit=1)[0]
+    return name.strip().lower().replace("_", "-")
 
 
 def _strip_json_fences(content: str) -> str:

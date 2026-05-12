@@ -136,6 +136,19 @@ def test_requirements_parse_dedupes_packages():
     assert requirements_to_dict(NotebookRequirements())["runtime"]["timeout"] == 3600
 
 
+def test_requirements_parse_forces_build_toolchain_for_triton():
+    requirements = parse_requirements(
+        {
+            "version": 1,
+            "runtime": {"build_toolchain": False},
+            "packages": {"pip": ["triton==3.4.0", "unsloth_zoo"], "apt": []},
+        },
+        source="test",
+    )
+
+    assert requirements.runtime.build_toolchain is True
+
+
 def test_requirements_summary_and_diff_are_concise():
     previous = NotebookRequirements(runtime=RuntimeRequirements(image="python:3.11"))
     current = NotebookRequirements(

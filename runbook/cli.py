@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import nbformat
 import typer
@@ -21,8 +22,11 @@ from runbook.modal_app import (
 )
 from runbook.progress import (
     NotebookProgress,
+    print_cell_output_panel,
     print_debug_info,
     print_failure_summary,
+    print_key_value_panel,
+    print_requirements_table,
     print_startup_failure_summary,
     print_success_summary,
 )
@@ -50,6 +54,7 @@ from runbook.settings import (
 )
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
+OutputMode = Literal["modern", "verbose", "plain", "jsonl"]
 
 
 @app.command()
@@ -139,12 +144,26 @@ def main(
             help="Resolve requirements and validate the Modal plan without executing the notebook.",
         ),
     ] = False,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", help="Use the detailed timestamped event stream."),
+    ] = False,
+    plain: Annotated[
+        bool,
+        typer.Option("--plain", help="Disable Rich panels/progress and print plain text."),
+    ] = False,
+    jsonl: Annotated[
+        bool,
+        typer.Option("--jsonl", help="Emit machine-readable JSON Lines output."),
+    ] = False,
 ) -> None:
     """Execute a notebook remotely on Modal and write an executed .ipynb."""
 
-    console = Console(stderr=True)
-    log = TerminalLog(console)
-    log.info("Runbook run started.")
+    mode = _resolve_output_mode(verbose=verbose, plain=plain, jsonl=jsonl)
+    console = Console(stderr=True, no_color=mode in {"plain", "jsonl"}, soft_wrap=mode == "jsonl")
+    log = TerminalLog(console, mode=mode)
+    _print_run_header(console, input_path, mode=mode)
+    log.info("Runbook run started.", event="run_started")
 
     settings_started = perf_counter()
     init_settings_dir()
@@ -155,7 +174,7 @@ def main(
     try:
         converted = read_notebook(input_path)
     except NotebookConversionError as exc:
-        console.print(f"Notebook conversion failed: {exc}")
+        _print_error(console, f"Notebook conversion failed: {exc}", mode=mode)
         raise typer.Exit(1) from exc
     log.done(f"Notebook ready from {converted.source_path}", conversion_started)
 
@@ -183,17 +202,17 @@ def main(
             pip_extra_index_urls=pip_extra_index_url,
         )
     except RequirementsConfigError as exc:
-        console.print(f"Execution requirements failed: {exc}")
+        _print_error(console, f"Execution requirements failed: {exc}", mode=mode)
         raise typer.Exit(1) from exc
     log.done("Execution requirements resolved", requirements_started)
 
     if requirements_result.generated:
         log.info(f"Wrote execution requirements to {requirements_result.path}.")
-        _print_requirements_plan(log, requirements_result)
     elif requirements_result.path.exists():
         log.info(f"Using execution requirements from {requirements_result.path}.")
     else:
         log.info("Using CLI-provided execution requirements.")
+    _print_requirements_plan(console, log, requirements_result, mode=mode)
 
     output_path = (output or default_output_path(converted.source_path)).expanduser().resolve()
     options_started = perf_counter()
@@ -222,15 +241,15 @@ def main(
         _run_preflight(log, output_path, options)
     except ModalSetupError as exc:
         log.done("Preflight failed", preflight_started)
-        console.print(f"Preflight failed: {exc}")
+        _print_error(console, f"Preflight failed: {exc}", mode=mode)
         raise typer.Exit(1) from exc
     log.done("Preflight completed", preflight_started)
 
     if dry_run:
-        console.print("Dry run complete; remote execution skipped.")
+        log.info("Dry run complete; remote execution skipped.", event="dry_run_complete")
         return
 
-    _print_remote_execution_start(log, options)
+    _print_remote_execution_start(console, log, options, mode=mode)
 
     notebook_data: str | None = None
     debug: dict | None = None
@@ -247,30 +266,49 @@ def main(
 
     try:
         with tempfile.TemporaryDirectory(prefix="runbook-"):
-            with NotebookProgress(console) as progress:
+            with NotebookProgress(console, enabled=mode == "modern") as progress:
                 for event in stream_remote_events(converted.notebook_json, options):
                     event_data: dict[str, Any] = dict(event)
                     kind = event_data.get("event")
                     if not modal_setup_reported:
-                        log.done("Modal setup and image preparation", modal_setup_started)
+                        log.done(
+                            "Modal setup and image preparation",
+                            modal_setup_started,
+                            event="modal_setup_finished",
+                        )
                         modal_setup_reported = True
                     if kind == "started":
                         remote_execution_started = perf_counter()
                         total_cells = int(event_data.get("total_cells", 0))
                         event_debug = event_data.get("debug")
                         debug = event_debug if isinstance(event_debug, dict) else debug
-                        print_debug_info(console, "Modal run started", debug)
+                        print_debug_info(console, "Modal run started", debug, mode=mode)
+                        log.event("modal_started", total_cells=total_cells, debug=debug or {})
                         log.info(
                             "Remote notebook execution started with "
-                            f"{total_cells} executable cell(s)."
+                            f"{total_cells} executable cell(s).",
+                            event="remote_execution_started",
+                            total_cells=total_cells,
                         )
                         progress.start(total_cells)
                     elif kind == "cell_started":
                         cell = int(event_data.get("cell", 0))
                         event_total = int(event_data.get("total_cells", total_cells))
                         cell_started_at[cell] = perf_counter()
-                        log.info(f"Cell {cell}/{event_total} started.")
-                        progress.current(cell, event_total)
+                        source_preview = str(event_data.get("source_preview") or "").strip()
+                        log.info(
+                            f"Cell {cell}/{event_total} started.",
+                            event="cell_started",
+                            cell=cell,
+                            total_cells=event_total,
+                            notebook_cell=event_data.get("notebook_cell"),
+                            source_preview=source_preview,
+                        )
+                        progress.current(
+                            cell,
+                            event_total,
+                            status=_one_line(source_preview, max_chars=48),
+                        )
                     elif kind == "cell_finished":
                         completed = int(event_data.get("completed", completed))
                         total_cells = int(event_data.get("total_cells", total_cells))
@@ -281,8 +319,15 @@ def main(
                             if started_at is not None
                             else ""
                         )
-                        log.info(f"Cell {cell}/{total_cells} finished{elapsed}.")
-                        progress.update(completed, total_cells)
+                        log.info(
+                            f"Cell {cell}/{total_cells} finished{elapsed}.",
+                            event="cell_finished",
+                            cell=cell,
+                            total_cells=total_cells,
+                            completed=completed,
+                            elapsed=elapsed.strip(),
+                        )
+                        progress.update(completed, total_cells, status="ok")
                     elif kind == "cell_failed":
                         cell = int(event_data.get("cell", 0))
                         event_total = int(event_data.get("total_cells", total_cells))
@@ -294,27 +339,40 @@ def main(
                         )
                         log.info(
                             f"Cell {cell}/{event_total} failed{elapsed}: "
-                            f"{event_data.get('error_type')}: {event_data.get('message')}"
+                            f"{event_data.get('error_type')}: {event_data.get('message')}",
+                            event="cell_failed",
+                            cell=cell,
+                            total_cells=event_total,
+                            error_type=event_data.get("error_type"),
+                            error_message=event_data.get("message"),
+                            allowed=bool(event_data.get("allowed")),
                         )
                         if event_data.get("allowed"):
                             allowed_error_count += 1
                         else:
                             failure = event_data
                     elif kind == "cell_output":
-                        _print_cell_output(log, event_data)
+                        _print_cell_output(console, log, event_data, mode=mode)
                     elif kind == "startup_failed":
                         startup_failure = event_data
                         log.info(
                             "Notebook startup failed before cell execution: "
-                            f"{event_data.get('error_type')}: {event_data.get('message')}"
+                            f"{event_data.get('error_type')}: {event_data.get('message')}",
+                            event="startup_failed",
+                            error_type=event_data.get("error_type"),
+                            error_message=event_data.get("message"),
                         )
                     elif kind == "finished":
                         finished = True
                         completed = int(event_data.get("completed", completed))
                         total_cells = int(event_data.get("total_cells", total_cells))
                         if remote_execution_started is not None:
-                            log.done("Remote notebook execution", remote_execution_started)
-                        progress.update(completed, total_cells)
+                            log.done(
+                                "Remote notebook execution",
+                                remote_execution_started,
+                                event="remote_execution_finished",
+                            )
+                        progress.update(completed, total_cells, status="complete")
                     elif kind == "notebook":
                         if event_data.get("format") == "ipynb-json":
                             status = _notebook_status(
@@ -333,49 +391,67 @@ def main(
                             )
                             log.info(
                                 "Received output notebook payload "
-                                f"({_format_bytes(len(notebook_data.encode('utf-8')))})."
+                                f"({_format_bytes(len(notebook_data.encode('utf-8')))}).",
+                                event="notebook_payload_received",
+                                bytes=len(notebook_data.encode("utf-8")),
                             )
     except ModalSetupError as exc:
         if not modal_setup_reported:
-            log.done("Modal setup failed", modal_setup_started)
+            log.done("Modal setup failed", modal_setup_started, event="modal_setup_failed")
         _write_notebook_if_available(output_path, notebook_data, log, partial=True)
-        console.print(f"Modal setup/execution failed: {exc}")
+        _print_error(console, f"Modal setup/execution failed: {exc}", mode=mode)
         if debug:
-            print_debug_info(console, "Modal run", debug)
+            print_debug_info(console, "Modal run", debug, mode=mode)
         raise typer.Exit(1) from exc
     except Exception as exc:
         if not modal_setup_reported:
-            log.done("Remote execution failed before first Modal event", modal_setup_started)
+            log.done(
+                "Remote execution failed before first Modal event",
+                modal_setup_started,
+                event="remote_execution_failed_before_event",
+            )
         _write_notebook_if_available(output_path, notebook_data, log, partial=True)
-        console.print(f"Remote execution failed: {exc}")
+        _print_error(console, f"Remote execution failed: {exc}", mode=mode)
         if debug:
-            print_debug_info(console, "Modal run", debug)
+            print_debug_info(console, "Modal run", debug, mode=mode)
         raise typer.Exit(1) from exc
 
     if not modal_setup_reported:
-        log.done("Modal setup and image preparation ended without events", modal_setup_started)
+        log.done(
+            "Modal setup and image preparation ended without events",
+            modal_setup_started,
+            event="modal_setup_ended_without_events",
+        )
 
     wrote_output = _write_notebook_if_available(output_path, notebook_data, log)
     written_path = output_path if wrote_output else None
 
     if startup_failure is not None:
-        print_startup_failure_summary(console, written_path, startup_failure, debug)
+        print_startup_failure_summary(console, written_path, startup_failure, debug, mode=mode)
         raise typer.Exit(1)
 
     if failure is not None:
-        print_failure_summary(console, written_path, failure, debug)
+        print_failure_summary(console, written_path, failure, debug, mode=mode)
         raise typer.Exit(1)
 
     if not finished:
-        console.print("Remote execution ended before a finished event was received.")
+        _print_error(
+            console,
+            "Remote execution ended before a finished event was received.",
+            mode=mode,
+        )
         if written_path is not None:
-            console.print(f"Wrote partial notebook to {written_path}.")
+            log.info(f"Wrote partial notebook to {written_path}.", event="partial_notebook_written")
         if debug:
-            print_debug_info(console, "Modal run", debug)
+            print_debug_info(console, "Modal run", debug, mode=mode)
         raise typer.Exit(1)
 
     if written_path is None:
-        console.print("Remote execution finished without returning an output notebook.")
+        _print_error(
+            console,
+            "Remote execution finished without returning an output notebook.",
+            mode=mode,
+        )
         raise typer.Exit(1)
 
     print_success_summary(
@@ -385,6 +461,16 @@ def main(
         total_cells,
         debug,
         allowed_error_count=allowed_error_count,
+        mode=mode,
+    )
+    log.event(
+        "run_finished",
+        status="finished",
+        output_path=str(written_path),
+        completed=completed,
+        total_cells=total_cells,
+        allowed_error_count=allowed_error_count,
+        debug=debug or {},
     )
 
 
@@ -522,21 +608,61 @@ def _load_or_create_requirements(
     )
 
 
-def _print_remote_execution_start(log: TerminalLog, options: ModalRunOptions) -> None:
+def _print_remote_execution_start(
+    console: Console,
+    log: TerminalLog,
+    options: ModalRunOptions,
+    *,
+    mode: OutputMode,
+) -> None:
     image = options.image or f"modal.Image.debian_slim(python_version='{options.python_version}')"
     gpu = options.gpu or "none"
     cpu = options.cpu if options.cpu is not None else "default"
     memory = f"{options.memory} MiB" if options.memory is not None else "default"
-    log.info(f"Starting remote execution on Modal (image={image}, gpu={gpu}).")
+    if mode == "modern":
+        print_key_value_panel(
+            console,
+            "[cyan]Modal run[/cyan]",
+            [
+                ("Image", image),
+                ("GPU", gpu),
+                ("CPU", str(cpu)),
+                ("Memory", str(memory)),
+                ("Timeout", f"{options.timeout}s"),
+                ("Kernel", options.kernel_name),
+                ("Packages", f"{len(options.pip_packages)} pip, {len(options.apt_packages)} apt"),
+                ("Build", "toolchain enabled" if options.build_toolchain else "no toolchain"),
+                ("Workdir", options.workdir),
+            ],
+        )
+    log.info(
+        f"Starting remote execution on Modal (image={image}, gpu={gpu}).",
+        event="modal_execution_starting",
+        image=image,
+        gpu=gpu,
+    )
     log.info(
         "Modal resources: "
         f"cpu={cpu}, memory={memory}, timeout={options.timeout}s, "
         f"kernel={options.kernel_name}, pip_packages={len(options.pip_packages)}, "
         f"apt_packages={len(options.apt_packages)}, secrets={len(options.secrets)}, "
-        f"volumes={len(options.volumes)}, workdir={options.workdir}."
+        f"volumes={len(options.volumes)}, workdir={options.workdir}.",
+        event="modal_resources",
+        cpu=cpu,
+        memory=memory,
+        timeout=options.timeout,
+        kernel=options.kernel_name,
+        pip_packages=len(options.pip_packages),
+        apt_packages=len(options.apt_packages),
+        secrets=len(options.secrets),
+        volumes=len(options.volumes),
+        workdir=options.workdir,
     )
-    log.info("Modal setup and image preparation started.")
-    log.info("Image setup can take a few minutes before cell progress appears.")
+    log.info("Modal setup and image preparation started.", event="modal_setup_started")
+    log.info(
+        "Image setup can take a few minutes before cell progress appears.",
+        event="modal_setup_hint",
+    )
 
 
 def _run_preflight(log: TerminalLog, output_path: Path, options: ModalRunOptions) -> None:
@@ -574,9 +700,38 @@ def _preflight_output_path(output_path: Path) -> None:
             pass
 
 
-def _print_requirements_plan(log: TerminalLog, result: RequirementsLoadResult) -> None:
+def _print_requirements_plan(
+    console: Console,
+    log: TerminalLog,
+    result: RequirementsLoadResult,
+    *,
+    mode: OutputMode,
+) -> None:
+    requirements = result.requirements
+    runtime = requirements.runtime
+    packages = requirements.packages
+    planner = requirements.planner
+    image = runtime.image or f"modal.Image.debian_slim(python_version='{runtime.python_version}')"
+    gpu = runtime.gpu or "none"
+    cpu = runtime.cpu if runtime.cpu is not None else "default"
+    memory = f"{runtime.memory} MiB" if runtime.memory is not None else "default"
+    confidence = f"{planner.confidence:.2f}" if planner.confidence is not None else "unknown"
+    if mode == "modern":
+        print_requirements_table(
+            console,
+            [
+                ("Planner", f"{planner.provider} / {planner.model} / confidence {confidence}"),
+                ("Runtime", f"{image} / GPU {gpu} / CPU {cpu} / memory {memory}"),
+                ("Timeout", f"{runtime.timeout}s"),
+                ("Kernel", runtime.kernel_name),
+                ("Packages", f"{len(packages.pip)} pip, {len(packages.apt)} apt"),
+                ("Build", "toolchain enabled" if runtime.build_toolchain else "no toolchain"),
+                ("Secrets", str(len(requirements.modal.secrets))),
+                ("Volumes", str(len(requirements.modal.volumes))),
+            ],
+        )
     for line in requirements_summary_lines(result.requirements):
-        log.info(f"Requirements: {line}")
+        log.info(f"Requirements: {line}", event="requirements_summary", summary=line)
     if result.previous_requirements is not None:
         diff_lines = requirements_diff_lines(
             result.previous_requirements,
@@ -584,12 +739,22 @@ def _print_requirements_plan(log: TerminalLog, result: RequirementsLoadResult) -
         )
         if diff_lines:
             for line in diff_lines:
-                log.info(f"Requirements diff: {line}")
+                log.info(f"Requirements diff: {line}", event="requirements_diff", diff=line)
         else:
-            log.info("Requirements diff: no effective changes.")
+            log.info(
+                "Requirements diff: no effective changes.",
+                event="requirements_diff",
+                diff="no effective changes",
+            )
 
 
-def _print_cell_output(log: TerminalLog, event: dict[str, Any]) -> None:
+def _print_cell_output(
+    console: Console,
+    log: TerminalLog,
+    event: dict[str, Any],
+    *,
+    mode: OutputMode,
+) -> None:
     text = str(event.get("text", ""))
     if not text:
         return
@@ -599,7 +764,22 @@ def _print_cell_output(log: TerminalLog, event: dict[str, Any]) -> None:
     label = f"Cell {cell}/{total} output"
     if stream:
         label += f" ({stream})"
-    log.info(f"{label}: {_one_line(text)}")
+    preview = _one_line(text)
+    log.info(
+        f"{label}: {preview}",
+        event="cell_output",
+        cell=cell,
+        total_cells=total,
+        stream=stream,
+        text=preview,
+    )
+    if mode == "modern":
+        print_cell_output_panel(
+            console,
+            cell_label=f"Cell {cell}/{total}",
+            stream=str(stream) if stream else None,
+            text=preview,
+        )
 
 
 def _one_line(text: str, *, max_chars: int = 240) -> str:
@@ -741,15 +921,77 @@ def _write_notebook_if_available(
 
 
 class TerminalLog:
-    def __init__(self, console: Console) -> None:
+    def __init__(self, console: Console, *, mode: OutputMode) -> None:
         self._console = console
+        self._mode = mode
         self._started = perf_counter()
 
-    def info(self, message: str) -> None:
-        self._console.print(f"T+{_format_duration(perf_counter() - self._started)} | {message}")
+    def info(self, message: str, *, event: str = "log", **fields: Any) -> None:
+        elapsed = perf_counter() - self._started
+        if self._mode == "jsonl":
+            self.event(event, message=message, elapsed_ms=round(elapsed * 1000), **fields)
+            return
+        if self._mode == "modern":
+            self._console.print(
+                f"[dim]T+{_format_duration(elapsed)}[/dim] [cyan]›[/cyan] {message}"
+            )
+            return
+        self._console.print(f"T+{_format_duration(elapsed)} | {message}")
 
-    def done(self, label: str, started: float) -> None:
-        self.info(f"{label} in {_format_duration(perf_counter() - started)}.")
+    def done(self, label: str, started: float, *, event: str = "step_finished") -> None:
+        duration = perf_counter() - started
+        self.info(
+            f"{label} in {_format_duration(duration)}.",
+            event=event,
+            label=label,
+            duration_ms=round(duration * 1000),
+        )
+
+    def event(self, event: str, **fields: Any) -> None:
+        if self._mode != "jsonl":
+            return
+        payload = {"event": event, **fields}
+        self._console.print(
+            json.dumps(payload, sort_keys=True, default=str),
+            highlight=False,
+            soft_wrap=True,
+        )
+
+
+def _resolve_output_mode(*, verbose: bool, plain: bool, jsonl: bool) -> OutputMode:
+    selected = [verbose, plain, jsonl]
+    if sum(bool(value) for value in selected) > 1:
+        raise typer.BadParameter("Choose only one output mode: --verbose, --plain, or --jsonl.")
+    if jsonl:
+        return "jsonl"
+    if plain:
+        return "plain"
+    if verbose:
+        return "verbose"
+    return "modern"
+
+
+def _print_run_header(console: Console, input_path: Path, *, mode: OutputMode) -> None:
+    if mode == "modern":
+        print_key_value_panel(
+            console,
+            "[bold cyan]Runbook[/bold cyan]",
+            [("Notebook", str(input_path)), ("Mode", "remote Modal execution")],
+            border_style="cyan",
+        )
+
+
+def _print_error(console: Console, message: str, *, mode: OutputMode) -> None:
+    if mode == "jsonl":
+        console.print(
+            json.dumps({"event": "error", "message": message}),
+            highlight=False,
+            soft_wrap=True,
+        )
+    elif mode == "modern":
+        console.print(f"[red]{message}[/red]")
+    else:
+        console.print(message)
 
 
 def _format_duration(seconds: float) -> str:
