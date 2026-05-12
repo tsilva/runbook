@@ -16,6 +16,25 @@ from runbook.progress import (
     print_startup_failure_summary,
     print_success_summary,
 )
+from runbook.requirements_plan import (
+    DEFAULT_KERNEL_NAME,
+    DEFAULT_TIMEOUT,
+    ModalRequirements,
+    NotebookRequirements,
+    PackageRequirements,
+    RequirementsConfigError,
+    RequirementsLoadResult,
+    RuntimeRequirements,
+    companion_requirements_path,
+    load_or_generate_requirements,
+)
+from runbook.settings import (
+    OpenRouterSettings,
+    init_settings_dir,
+    load_openrouter_settings,
+    runbook_env_path,
+    save_openrouter_settings,
+)
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 
@@ -32,9 +51,9 @@ def main(
         typer.Option("--gpu", help="Modal GPU type, for example A10. Omit for CPU."),
     ] = None,
     timeout: Annotated[
-        int,
+        int | None,
         typer.Option("--timeout", help="Modal function and per-cell timeout in seconds."),
-    ] = 3600,
+    ] = None,
     cpu: Annotated[
         float | None,
         typer.Option("--cpu", help="Modal CPU core request."),
@@ -55,33 +74,72 @@ def main(
         str | None,
         typer.Option("--image", help="Public registry image to use as the Modal base image."),
     ] = None,
+    pip_package: Annotated[
+        list[str] | None,
+        typer.Option("--pip-package", help="Additional pip package. Repeatable."),
+    ] = None,
+    apt_package: Annotated[
+        list[str] | None,
+        typer.Option("--apt-package", help="Additional apt package. Repeatable."),
+    ] = None,
     allow_errors: Annotated[
         bool,
         typer.Option("--allow-errors", help="Continue executing after cell errors."),
     ] = False,
     kernel_name: Annotated[
-        str,
+        str | None,
         typer.Option("--kernel-name", help="Jupyter kernel name."),
-    ] = "python3",
+    ] = None,
 ) -> None:
     """Execute a notebook remotely on Modal and write an executed .ipynb."""
 
     console = Console(stderr=True)
+    init_settings_dir()
     try:
         converted = read_notebook(input_path)
     except NotebookConversionError as exc:
         console.print(f"Notebook conversion failed: {exc}")
         raise typer.Exit(1) from exc
 
+    try:
+        requirements_result = _load_or_create_requirements(
+            console,
+            converted.source_path,
+            converted.notebook_json,
+            timeout=timeout,
+            gpu=gpu,
+            cpu=cpu,
+            memory=memory,
+            secrets=secret,
+            volumes=volume,
+            image=image,
+            pip_packages=pip_package,
+            apt_packages=apt_package,
+            kernel_name=kernel_name,
+        )
+    except RequirementsConfigError as exc:
+        console.print(f"Execution requirements failed: {exc}")
+        raise typer.Exit(1) from exc
+
+    if requirements_result.generated:
+        console.print(f"Wrote execution requirements to {requirements_result.path}.")
+    elif requirements_result.path.exists():
+        console.print(f"Using execution requirements from {requirements_result.path}.")
+    else:
+        console.print("Using CLI-provided execution requirements.")
+
     output_path = (output or default_output_path(converted.source_path)).expanduser().resolve()
-    options = ModalRunOptions(
+    options = _merge_options(
+        requirements_result.requirements,
         timeout=timeout,
         gpu=gpu,
         cpu=cpu,
         memory=memory,
-        secrets=secret or [],
-        volumes=volume or [],
+        secrets=secret,
+        volumes=volume,
         image=image,
+        pip_packages=pip_package,
+        apt_packages=apt_package,
         allow_errors=allow_errors,
         kernel_name=kernel_name,
     )
@@ -173,6 +231,138 @@ def main(
         debug,
         allowed_error_count=allowed_error_count,
     )
+
+
+def _merge_options(
+    requirements: NotebookRequirements,
+    *,
+    timeout: int | None,
+    gpu: str | None,
+    cpu: float | None,
+    memory: int | None,
+    secrets: list[str] | None,
+    volumes: list[str] | None,
+    image: str | None,
+    pip_packages: list[str] | None,
+    apt_packages: list[str] | None,
+    allow_errors: bool,
+    kernel_name: str | None,
+) -> ModalRunOptions:
+    runtime = requirements.runtime
+    modal = requirements.modal
+    packages = requirements.packages
+    return ModalRunOptions(
+        timeout=timeout if timeout is not None else runtime.timeout or DEFAULT_TIMEOUT,
+        gpu=gpu if gpu is not None else runtime.gpu,
+        cpu=cpu if cpu is not None else runtime.cpu,
+        memory=memory if memory is not None else runtime.memory,
+        secrets=secrets if secrets is not None else modal.secrets,
+        volumes=volumes if volumes is not None else modal.volumes,
+        image=image if image is not None else runtime.image,
+        pip_packages=_dedupe([*packages.pip, *(pip_packages or [])]),
+        apt_packages=_dedupe([*packages.apt, *(apt_packages or [])]),
+        allow_errors=allow_errors,
+        kernel_name=kernel_name
+        if kernel_name is not None
+        else runtime.kernel_name or DEFAULT_KERNEL_NAME,
+    )
+
+
+def _load_or_create_requirements(
+    console: Console,
+    input_path: Path,
+    notebook_json: str,
+    *,
+    timeout: int | None,
+    gpu: str | None,
+    cpu: float | None,
+    memory: int | None,
+    secrets: list[str] | None,
+    volumes: list[str] | None,
+    image: str | None,
+    pip_packages: list[str] | None,
+    apt_packages: list[str] | None,
+    kernel_name: str | None,
+) -> RequirementsLoadResult:
+    requirements_path = companion_requirements_path(input_path)
+    if requirements_path.exists():
+        return load_or_generate_requirements(input_path, notebook_json)
+
+    settings = _load_or_prompt_openrouter_settings(console)
+    if settings.api_key:
+        return load_or_generate_requirements(
+            input_path,
+            notebook_json,
+            api_key=settings.api_key,
+            model=settings.model,
+        )
+
+    if not image:
+        raise RequirementsConfigError(
+            "No companion requirements file exists and OpenRouter settings were "
+            "not provided. Pass --image to run without generating requirements, "
+            "plus --gpu/--pip-package/--apt-package as needed."
+        )
+
+    return RequirementsLoadResult(
+        path=requirements_path,
+        requirements=NotebookRequirements(
+            runtime=RuntimeRequirements(
+                image=image,
+                gpu=gpu,
+                cpu=cpu,
+                memory=memory,
+                timeout=timeout or DEFAULT_TIMEOUT,
+                kernel_name=kernel_name or DEFAULT_KERNEL_NAME,
+            ),
+            packages=PackageRequirements(
+                pip=pip_packages or [],
+                apt=apt_packages or [],
+            ),
+            modal=ModalRequirements(
+                secrets=secrets or [],
+                volumes=volumes or [],
+            ),
+        ),
+        generated=False,
+    )
+
+
+def _load_or_prompt_openrouter_settings(console: Console) -> OpenRouterSettings:
+    init_settings_dir()
+    settings = load_openrouter_settings()
+    if settings.api_key:
+        return settings
+
+    console.print(
+        f"No OpenRouter settings found. Runbook stores them in {runbook_env_path()}."
+    )
+    api_key = typer.prompt(
+        "OpenRouter API key",
+        default="",
+        hide_input=True,
+        show_default=False,
+    ).strip()
+    if not api_key:
+        return OpenRouterSettings(api_key=None, model=settings.model)
+
+    model = typer.prompt(
+        "OpenRouter model",
+        default=settings.model,
+    ).strip() or settings.model
+    settings = OpenRouterSettings(api_key=api_key, model=model)
+    save_openrouter_settings(settings)
+    return settings
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
 
 
 def _write_notebook_if_available(output_path: Path, notebook_data: str | None) -> bool:

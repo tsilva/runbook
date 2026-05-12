@@ -39,6 +39,29 @@ python3 -m pytest  # run tests from a dev environment with pytest installed
 
 CPU execution is the default when `--gpu` is omitted.
 
+On the first run, Runbook creates a companion execution requirements file next
+to the notebook:
+
+```text
+input.ipynb.yaml
+```
+
+If that file is missing, Runbook sends a full Jupytext dump of the notebook to
+OpenRouter and asks a model to infer the Modal image, GPU, packages, and runtime
+settings needed for remote execution. On first run, Runbook initializes
+`~/.config/runbook`, prompts for an OpenRouter API key and model, and stores
+them in `~/.config/runbook/.env`. The default model is `openai/gpt-5.5`.
+Later runs reuse the saved YAML file and do not call the model unless the file
+is deleted. CLI flags override values from the YAML file.
+
+If you skip the OpenRouter API key prompt and no companion YAML exists, Runbook
+will not generate one. In that mode, pass `--image` and any needed package flags
+manually:
+
+```bash
+runbook input.ipynb --image python:3.11 --pip-package pandas --apt-package git
+```
+
 ## Notes
 
 - Execution happens inside one Modal container.
@@ -52,8 +75,8 @@ CPU execution is the default when `--gpu` is omitted.
   containing those errors.
 - The local notebook is uploaded as notebook JSON. Additional local data files
   are not uploaded; use Modal Volumes or bake data into the selected image.
-- `--image` accepts a public registry image and adds Python 3.11 plus Runbook's
-  notebook execution dependencies.
+- `--image` accepts a public registry image and adds Runbook's notebook
+  execution dependencies plus packages from the companion YAML file.
 - Live intra-cell stdout streaming is not implemented; stdout/stderr are
   captured in the output notebook.
 
@@ -63,4 +86,4 @@ CPU execution is the default when `--gpu` is omitted.
 
 ## License
 
-No license file is currently present.
+MIT. See [LICENSE](./LICENSE).

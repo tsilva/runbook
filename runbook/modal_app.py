@@ -16,6 +16,8 @@ class ModalRunOptions:
     secrets: list[str] = field(default_factory=list)
     volumes: list[str] = field(default_factory=list)
     image: str | None = None
+    pip_packages: list[str] = field(default_factory=list)
+    apt_packages: list[str] = field(default_factory=list)
     allow_errors: bool = False
     kernel_name: str = "python3"
 
@@ -56,7 +58,12 @@ def stream_remote_events(notebook_json: str, options: ModalRunOptions) -> Iterat
     app_name = "runbook"
     function_name = "runbook_remote_runner"
     app = modal.App(app_name)
-    image = _build_image(modal, options.image)
+    image = _build_image(
+        modal,
+        options.image,
+        pip_packages=options.pip_packages,
+        apt_packages=options.apt_packages,
+    )
     function_kwargs: dict[str, Any] = {
         "image": image,
         "timeout": options.timeout,
@@ -85,6 +92,8 @@ def stream_remote_events(notebook_json: str, options: ModalRunOptions) -> Iterat
             "memory": options.memory,
             "timeout": options.timeout,
             "image": options.image or "modal.Image.debian_slim(python_version='3.11')",
+            "pip_packages": options.pip_packages,
+            "apt_packages": options.apt_packages,
             "secrets": options.secrets,
             "volumes": options.volumes,
         },
@@ -103,16 +112,34 @@ def stream_remote_events(notebook_json: str, options: ModalRunOptions) -> Iterat
         raise ModalSetupError(f"Modal execution failed: {exc}") from exc
 
 
-def _build_image(modal: Any, image_name: str | None) -> Any:
+def _build_image(
+    modal: Any,
+    image_name: str | None,
+    *,
+    pip_packages: list[str] | None = None,
+    apt_packages: list[str] | None = None,
+) -> Any:
     if image_name:
         image = modal.Image.from_registry(image_name)
     else:
         image = modal.Image.debian_slim(python_version="3.11")
+    apt = _dedupe(["build-essential", *(apt_packages or [])])
+    pip = _dedupe(["nbformat", "nbclient", "ipykernel", *(pip_packages or [])])
     return (
-        image.apt_install("build-essential")
-        .pip_install("nbformat", "nbclient", "ipykernel")
+        image.apt_install(*apt)
+        .pip_install(*pip)
         .add_local_python_source("runbook")
     )
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
 
 
 def _parse_volumes(modal: Any, volume_specs: list[str]) -> dict[str, Any]:
