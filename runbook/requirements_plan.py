@@ -16,6 +16,7 @@ import yaml
 DEFAULT_TIMEOUT = 3600
 DEFAULT_KERNEL_NAME = "python3"
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.5"
+DEFAULT_OPENROUTER_REASONING_EFFORT = "high"
 OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
@@ -240,6 +241,10 @@ def _call_openrouter(
         "model": model,
         "temperature": 0,
         "max_tokens": 2400,
+        "reasoning": {
+            "effort": DEFAULT_OPENROUTER_REASONING_EFFORT,
+            "exclude": True,
+        },
         "response_format": {
             "type": "json_schema",
             "json_schema": {
@@ -363,7 +368,7 @@ def _with_planner_defaults(
 ) -> NotebookRequirements:
     planner = PlannerMetadata(
         provider=requirements.planner.provider or "openrouter",
-        model=requirements.planner.model or model,
+        model=model,
         generated_at=requirements.planner.generated_at
         or datetime.now(timezone.utc).isoformat(),
         confidence=requirements.planner.confidence,

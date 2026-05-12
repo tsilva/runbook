@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+
 import nbformat
 import yaml
 
 from runbook.requirements_plan import (
     NotebookRequirements,
+    _call_openrouter,
     companion_requirements_path,
     load_or_generate_requirements,
     parse_requirements,
@@ -84,7 +87,7 @@ def test_load_or_generate_calls_openrouter_and_writes_yaml(monkeypatch, tmp_path
             "modal": {"secrets": [], "volumes": []},
             "planner": {
                 "provider": "openrouter",
-                "model": "test-model",
+                "model": "wrong-model",
                 "generated_at": None,
                 "confidence": 0.8,
                 "notes": ["Notebook references CUDA."],
@@ -98,8 +101,10 @@ def test_load_or_generate_calls_openrouter_and_writes_yaml(monkeypatch, tmp_path
     assert result.generated is True
     assert result.path.exists()
     assert result.requirements.runtime.gpu == "T4"
+    assert result.requirements.planner.model == "test-model"
     saved = yaml.safe_load(result.path.read_text(encoding="utf-8"))
     assert saved["packages"]["pip"] == ["torch"]
+    assert saved["planner"]["model"] == "test-model"
     assert saved["planner"]["generated_at"]
 
 
@@ -115,3 +120,39 @@ def test_requirements_parse_dedupes_packages():
     assert requirements.packages.pip == ["pandas"]
     assert requirements.packages.apt == ["ffmpeg"]
     assert requirements_to_dict(NotebookRequirements())["runtime"]["timeout"] == 3600
+
+
+def test_openrouter_request_uses_high_reasoning(monkeypatch):
+    captured_payload = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(requirements_to_dict(NotebookRequirements()))
+                            }
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 120
+        captured_payload.update(json.loads(request.data.decode("utf-8")))
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    _call_openrouter("print('hello')", "openai/gpt-5.5", api_key="sk-test")
+
+    assert captured_payload["model"] == "openai/gpt-5.5"
+    assert captured_payload["reasoning"] == {"effort": "high", "exclude": True}

@@ -290,6 +290,9 @@ def _load_or_create_requirements(
 
     settings = _load_or_prompt_openrouter_settings(console)
     if settings.api_key:
+        console.print(
+            f"Generating execution requirements with OpenRouter ({settings.model})..."
+        )
         return load_or_generate_requirements(
             input_path,
             notebook_json,

@@ -309,6 +309,7 @@ def test_cli_prompts_for_openrouter_settings_and_writes_yaml(monkeypatch, tmp_pa
     )
 
     assert result.exit_code == 0, result.output
+    assert "Generating execution requirements with OpenRouter (openai/gpt-5.5)" in result.output
     assert "Wrote execution requirements" in result.output
     assert input_path.with_name("input.ipynb.yaml").exists()
     assert (tmp_path / "config" / ".env").exists()
