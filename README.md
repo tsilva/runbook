@@ -36,6 +36,7 @@ runbook analysis.py --output runs/analysis.ipynb
 runbook input.ipynb --cpu 4 --memory 16384 --secret huggingface-token
 runbook input.ipynb --volume model-cache:/models --kernel-name python3
 runbook input.ipynb --allow-errors
+runbook input.ipynb --mode serve
 runbook input.ipynb --generate-requirements --dry-run
 runbook input.ipynb --regenerate-requirements --dry-run
 runbook input.ipynb --dry-run
@@ -80,6 +81,10 @@ runbook input.ipynb --image python:3.11 --pip-package pandas --apt-package git
 - Execution happens inside one Modal container.
 - Runbook starts one Jupyter kernel and executes code cells one by one, so state
   persists between cells.
+- `--mode execute` is the default. `--mode serve` skips execution, starts
+  JupyterLab in the Modal container, writes the notebook into the remote workdir,
+  and prints a tokenized server URL that can be used from a browser or VS Code's
+  existing Jupyter server flow.
 - Cell outputs, rich display outputs, stdout/stderr, and tracebacks are
   preserved in the written notebook.
 - During execution, Runbook writes live cell outputs and the current-cell pointer

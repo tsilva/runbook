@@ -130,6 +130,80 @@ def test_cli_dry_run_preflights_without_remote_execution(monkeypatch, tmp_path):
     assert not _finished_path(output_path).exists()
 
 
+def test_cli_serve_mode_starts_remote_jupyter_without_execution(monkeypatch, tmp_path):
+    input_path = tmp_path / "input.ipynb"
+    output_path = tmp_path / "output.ipynb"
+    _write_input(input_path)
+    _patch_requirements(monkeypatch)
+
+    class FakePreflightReport:
+        checks = ["static plan ok"]
+        warnings = []
+
+    def fake_preflight(options):
+        assert options.jupyter_server is True
+        return FakePreflightReport()
+
+    def fail_execute(notebook_json, options):
+        raise AssertionError("serve mode should not execute the notebook")
+
+    def fake_serve(notebook_json, notebook_name, options):
+        assert notebook_name == "input.ipynb"
+        assert options.jupyter_server is True
+        yield {
+            "event": "serve_started",
+            "jupyter_url": "https://example.modal.host/lab/tree/input.ipynb?token=tok",
+            "vscode_url": "https://example.modal.host/?token=tok",
+            "token": "tok",
+            "notebook_name": "input.ipynb",
+            "notebook_path": f"{options.workdir}/input.ipynb",
+            "debug": {"app_name": "runbook", "function_name": "runbook_jupyter_server"},
+        }
+        yield {"event": "serve_stopped", "return_code": 0}
+
+    monkeypatch.setattr("runbook.cli.preflight_modal_run", fake_preflight)
+    monkeypatch.setattr("runbook.cli.stream_remote_events", fail_execute)
+    monkeypatch.setattr("runbook.cli.stream_remote_server_events", fake_serve)
+
+    result = runner.invoke(
+        app,
+        [str(input_path), "--output", str(output_path), "--mode", "serve"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Starting remote Jupyter server on Modal" in result.output
+    assert "Remote Jupyter server is ready: https://example.modal.host/?token=tok" in result.output
+    assert "Remote Jupyter server stopped." in result.output
+    assert not _finished_path(output_path).exists()
+    assert not _running_path(output_path).exists()
+
+
+def test_cli_serve_mode_dry_run_skips_server_start(monkeypatch, tmp_path):
+    input_path = tmp_path / "input.ipynb"
+    _write_input(input_path)
+    _patch_requirements(monkeypatch)
+
+    class FakePreflightReport:
+        checks = ["static plan ok"]
+        warnings = []
+
+    def fake_preflight(options):
+        assert options.jupyter_server is True
+        return FakePreflightReport()
+
+    def fail_serve(notebook_json, notebook_name, options):
+        raise AssertionError("dry run should not start the Jupyter server")
+
+    monkeypatch.setattr("runbook.cli.preflight_modal_run", fake_preflight)
+    monkeypatch.setattr("runbook.cli.stream_remote_server_events", fail_serve)
+
+    result = runner.invoke(app, [str(input_path), "--mode", "serve", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "Preflight: static plan ok" in result.output
+    assert "Dry run complete; server startup skipped." in result.output
+
+
 def test_cli_plain_output_avoids_rich_panels(monkeypatch, tmp_path):
     input_path = tmp_path / "input.ipynb"
     output_path = tmp_path / "output.ipynb"
@@ -619,6 +693,56 @@ def test_modal_image_includes_build_toolchain():
             "index_url": "https://example.test/simple",
             "extra_index_url": ["https://extra.example.test/simple"],
         },
+    ) in image.calls
+
+
+def test_modal_image_includes_jupyterlab_for_server_mode():
+    from runbook.modal_app import _build_image
+
+    class FakeImage:
+        def __init__(self):
+            self.calls = []
+
+        def apt_install(self, *packages):
+            self.calls.append(("apt_install", packages))
+            return self
+
+        def pip_install(self, *packages, **kwargs):
+            self.calls.append(("pip_install", packages, kwargs))
+            return self
+
+        def add_local_python_source(self, package):
+            self.calls.append(("add_local_python_source", package))
+            return self
+
+    class FakeImageFactory:
+        def __init__(self, image):
+            self.image = image
+
+        def from_registry(self, image_name):
+            self.image.calls.append(("from_registry", image_name))
+            return self.image
+
+        def debian_slim(self, python_version):
+            self.image.calls.append(("debian_slim", python_version))
+            return self.image
+
+    class FakeModal:
+        def __init__(self, image):
+            self.Image = FakeImageFactory(image)
+
+    image = FakeImage()
+    _build_image(
+        FakeModal(image),
+        None,
+        pip_packages=["pandas"],
+        include_jupyter=True,
+    )
+
+    assert (
+        "pip_install",
+        ("nbformat", "nbclient", "ipykernel", "jupyterlab", "pandas"),
+        {},
     ) in image.calls
 
 

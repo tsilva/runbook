@@ -79,6 +79,21 @@ class NotebookEvent(TypedDict):
     data: str
 
 
+class ServeStartedEvent(TypedDict):
+    event: Literal["serve_started"]
+    jupyter_url: str
+    vscode_url: str
+    token: str
+    notebook_name: str
+    notebook_path: str
+    debug: DebugInfo
+
+
+class ServeStoppedEvent(TypedDict):
+    event: Literal["serve_stopped"]
+    return_code: int | None
+
+
 RunbookEvent = (
     StartedEvent
     | CellStartedEvent
@@ -88,6 +103,8 @@ RunbookEvent = (
     | StartupFailedEvent
     | FinishedEvent
     | NotebookEvent
+    | ServeStartedEvent
+    | ServeStoppedEvent
 )
 
 Event = RunbookEvent

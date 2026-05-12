@@ -4,6 +4,7 @@ import json
 import shlex
 import tempfile
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
@@ -20,6 +21,7 @@ from runbook.modal_app import (
     ModalSetupError,
     preflight_modal_run,
     stream_remote_events,
+    stream_remote_server_events,
 )
 from runbook.progress import (
     NotebookProgress,
@@ -56,6 +58,7 @@ from runbook.settings import (
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 OutputMode = Literal["modern", "verbose", "plain", "jsonl"]
+RunMode = Literal["execute", "serve"]
 
 
 @app.command()
@@ -105,6 +108,14 @@ def main(
         bool,
         typer.Option("--allow-errors", help="Continue executing after cell errors."),
     ] = False,
+    run_mode: Annotated[
+        RunMode,
+        typer.Option(
+            "--mode",
+            case_sensitive=False,
+            help="Run mode: execute the notebook or serve it through remote Jupyter.",
+        ),
+    ] = "execute",
     kernel_name: Annotated[
         str | None,
         typer.Option("--kernel-name", help="Jupyter kernel name."),
@@ -161,10 +172,14 @@ def main(
 ) -> None:
     """Execute a notebook remotely on Modal and write .running/.finished notebooks."""
 
-    mode = _resolve_output_mode(verbose=verbose, plain=plain, jsonl=jsonl)
-    console = Console(stderr=True, no_color=mode in {"plain", "jsonl"}, soft_wrap=mode == "jsonl")
-    log = TerminalLog(console, mode=mode)
-    _print_run_header(console, input_path, mode=mode)
+    output_mode = _resolve_output_mode(verbose=verbose, plain=plain, jsonl=jsonl)
+    console = Console(
+        stderr=True,
+        no_color=output_mode in {"plain", "jsonl"},
+        soft_wrap=output_mode == "jsonl",
+    )
+    log = TerminalLog(console, mode=output_mode)
+    _print_run_header(console, input_path, output_mode=output_mode, run_mode=run_mode)
     log.info("Runbook run started.", event="run_started")
 
     settings_started = perf_counter()
@@ -176,7 +191,7 @@ def main(
     try:
         converted = read_notebook(input_path)
     except NotebookConversionError as exc:
-        _print_error(console, f"Notebook conversion failed: {exc}", mode=mode)
+        _print_error(console, f"Notebook conversion failed: {exc}", mode=output_mode)
         raise typer.Exit(1) from exc
     log.done(f"Notebook ready from {converted.source_path}", conversion_started)
 
@@ -204,7 +219,7 @@ def main(
             pip_extra_index_urls=pip_extra_index_url,
         )
     except RequirementsConfigError as exc:
-        _print_error(console, f"Execution requirements failed: {exc}", mode=mode)
+        _print_error(console, f"Execution requirements failed: {exc}", mode=output_mode)
         raise typer.Exit(1) from exc
     log.done("Execution requirements resolved", requirements_started)
 
@@ -214,12 +229,8 @@ def main(
         log.info(f"Using execution requirements from {requirements_result.path}.")
     else:
         log.info("Using CLI-provided execution requirements.")
-    _print_requirements_plan(console, log, requirements_result, mode=mode)
+    _print_requirements_plan(console, log, requirements_result, mode=output_mode)
 
-    requested_output_path = (
-        output or default_output_path(converted.source_path)
-    ).expanduser().resolve()
-    running_output_path, finished_output_path = _run_output_paths(requested_output_path)
     options_started = perf_counter()
     options = _merge_options(
         requirements_result.requirements,
@@ -239,22 +250,45 @@ def main(
         pip_index_url=pip_index_url,
         pip_extra_index_urls=pip_extra_index_url,
     )
+    if run_mode == "serve":
+        options = replace(options, jupyter_server=True)
     log.done("Modal run options resolved", options_started)
+
+    if run_mode == "execute":
+        requested_output_path = (
+            output or default_output_path(converted.source_path)
+        ).expanduser().resolve()
+        running_output_path, finished_output_path = _run_output_paths(requested_output_path)
+        output_paths = [running_output_path, finished_output_path]
+    else:
+        output_paths = []
 
     preflight_started = perf_counter()
     try:
-        _run_preflight(log, [running_output_path, finished_output_path], options)
+        _run_preflight(log, output_paths, options)
     except ModalSetupError as exc:
         log.done("Preflight failed", preflight_started)
-        _print_error(console, f"Preflight failed: {exc}", mode=mode)
+        _print_error(console, f"Preflight failed: {exc}", mode=output_mode)
         raise typer.Exit(1) from exc
     log.done("Preflight completed", preflight_started)
 
     if dry_run:
-        log.info("Dry run complete; remote execution skipped.", event="dry_run_complete")
+        skipped = "server startup" if run_mode == "serve" else "remote execution"
+        log.info(f"Dry run complete; {skipped} skipped.", event="dry_run_complete")
         return
 
-    _print_remote_execution_start(console, log, options, mode=mode)
+    if run_mode == "serve":
+        _serve_remote_notebook(
+            console,
+            log,
+            converted.notebook_json,
+            converted.source_path,
+            options,
+            output_mode=output_mode,
+        )
+        return
+
+    _print_remote_execution_start(console, log, options, mode=output_mode)
 
     live_notebook = LiveNotebookWriter(
         converted.notebook_json,
@@ -285,7 +319,7 @@ def main(
 
     try:
         with tempfile.TemporaryDirectory(prefix="runbook-"):
-            with NotebookProgress(console, enabled=mode == "modern") as progress:
+            with NotebookProgress(console, enabled=output_mode == "modern") as progress:
                 for event in stream_remote_events(converted.notebook_json, options):
                     event_data: dict[str, Any] = dict(event)
                     kind = event_data.get("event")
@@ -307,7 +341,7 @@ def main(
                             total_cells=total_cells,
                             debug=debug,
                         )
-                        print_debug_info(console, "Modal run started", debug, mode=mode)
+                        print_debug_info(console, "Modal run started", debug, mode=output_mode)
                         log.event("modal_started", total_cells=total_cells, debug=debug or {})
                         log.info(
                             "Remote notebook execution started with "
@@ -389,7 +423,7 @@ def main(
                         )
                     elif kind == "cell_output":
                         live_notebook.cell_output(event_data, completed=completed, debug=debug)
-                        _print_cell_output(console, log, event_data, mode=mode)
+                        _print_cell_output(console, log, event_data, mode=output_mode)
                     elif kind == "startup_failed":
                         startup_failure = event_data
                         live_notebook.startup_failed(event_data, debug=debug)
@@ -453,9 +487,9 @@ def main(
         else:
             _write_notebook_if_available(finished_output_path, notebook_data, log, partial=True)
             _delete_running_output(running_output_path, log)
-        _print_error(console, f"Modal setup/execution failed: {exc}", mode=mode)
+        _print_error(console, f"Modal setup/execution failed: {exc}", mode=output_mode)
         if debug:
-            print_debug_info(console, "Modal run", debug, mode=mode)
+            print_debug_info(console, "Modal run", debug, mode=output_mode)
         raise typer.Exit(1) from exc
     except Exception as exc:
         if not modal_setup_reported:
@@ -474,9 +508,9 @@ def main(
         else:
             _write_notebook_if_available(finished_output_path, notebook_data, log, partial=True)
             _delete_running_output(running_output_path, log)
-        _print_error(console, f"Remote execution failed: {exc}", mode=mode)
+        _print_error(console, f"Remote execution failed: {exc}", mode=output_mode)
         if debug:
-            print_debug_info(console, "Modal run", debug, mode=mode)
+            print_debug_info(console, "Modal run", debug, mode=output_mode)
         raise typer.Exit(1) from exc
 
     if not modal_setup_reported:
@@ -505,30 +539,36 @@ def main(
     written_path = finished_output_path if wrote_output else None
 
     if startup_failure is not None:
-        print_startup_failure_summary(console, written_path, startup_failure, debug, mode=mode)
+        print_startup_failure_summary(
+            console,
+            written_path,
+            startup_failure,
+            debug,
+            mode=output_mode,
+        )
         raise typer.Exit(1)
 
     if failure is not None:
-        print_failure_summary(console, written_path, failure, debug, mode=mode)
+        print_failure_summary(console, written_path, failure, debug, mode=output_mode)
         raise typer.Exit(1)
 
     if not finished:
         _print_error(
             console,
             "Remote execution ended before a finished event was received.",
-            mode=mode,
+            mode=output_mode,
         )
         if written_path is not None:
             log.info(f"Wrote partial notebook to {written_path}.", event="partial_notebook_written")
         if debug:
-            print_debug_info(console, "Modal run", debug, mode=mode)
+            print_debug_info(console, "Modal run", debug, mode=output_mode)
         raise typer.Exit(1)
 
     if written_path is None:
         _print_error(
             console,
             "Remote execution finished without returning an output notebook.",
-            mode=mode,
+            mode=output_mode,
         )
         raise typer.Exit(1)
 
@@ -539,7 +579,7 @@ def main(
         total_cells,
         debug,
         allowed_error_count=allowed_error_count,
-        mode=mode,
+        mode=output_mode,
     )
     log.event(
         "run_finished",
@@ -550,6 +590,62 @@ def main(
         allowed_error_count=allowed_error_count,
         debug=debug or {},
     )
+
+
+def _serve_remote_notebook(
+    console: Console,
+    log: TerminalLog,
+    notebook_json: str,
+    source_path: Path,
+    options: ModalRunOptions,
+    *,
+    output_mode: OutputMode,
+) -> None:
+    _print_remote_server_start(console, log, options, mode=output_mode)
+
+    modal_setup_started = perf_counter()
+    modal_setup_reported = False
+    server_ready = False
+
+    try:
+        for event in stream_remote_server_events(notebook_json, source_path.name, options):
+            event_data: dict[str, Any] = dict(event)
+            kind = event_data.get("event")
+            if not modal_setup_reported:
+                log.done(
+                    "Modal setup and Jupyter server preparation",
+                    modal_setup_started,
+                    event="modal_setup_finished",
+                )
+                modal_setup_reported = True
+
+            if kind == "serve_started":
+                server_ready = True
+                _print_server_ready(console, log, event_data, mode=output_mode)
+            elif kind == "serve_stopped":
+                log.info(
+                    "Remote Jupyter server stopped.",
+                    event="jupyter_server_stopped",
+                    return_code=event_data.get("return_code"),
+                )
+    except ModalSetupError as exc:
+        if not modal_setup_reported:
+            log.done("Modal setup failed", modal_setup_started, event="modal_setup_failed")
+        _print_error(console, f"Modal Jupyter server failed: {exc}", mode=output_mode)
+        raise typer.Exit(1) from exc
+    except KeyboardInterrupt as exc:
+        log.info("Remote Jupyter server interrupted.", event="jupyter_server_interrupted")
+        raise typer.Exit(130) from exc
+
+    if not server_ready:
+        _print_error(
+            console,
+            "Remote Jupyter server ended before a URL was received.",
+            mode=output_mode,
+        )
+        raise typer.Exit(1)
+
+    log.event("run_finished", status="served", workdir=options.workdir)
 
 
 def _merge_options(
@@ -757,6 +853,91 @@ def _print_remote_execution_start(
     log.info(
         "Image setup can take a few minutes before cell progress appears.",
         event="modal_setup_hint",
+    )
+
+
+def _print_remote_server_start(
+    console: Console,
+    log: TerminalLog,
+    options: ModalRunOptions,
+    *,
+    mode: OutputMode,
+) -> None:
+    image = options.image or f"modal.Image.debian_slim(python_version='{options.python_version}')"
+    gpu = options.gpu or "none"
+    cpu = options.cpu if options.cpu is not None else "default"
+    memory = f"{options.memory} MiB" if options.memory is not None else "default"
+    if mode == "modern":
+        print_key_value_panel(
+            console,
+            "[cyan]Remote Jupyter[/cyan]",
+            [
+                ("Image", image),
+                ("GPU", gpu),
+                ("CPU", str(cpu)),
+                ("Memory", str(memory)),
+                ("Server timeout", f"{options.timeout}s"),
+                ("Packages", f"{len(options.pip_packages)} pip, {len(options.apt_packages)} apt"),
+                ("Build", "toolchain enabled" if options.build_toolchain else "no toolchain"),
+                ("Workdir", options.workdir),
+            ],
+        )
+    log.info(
+        f"Starting remote Jupyter server on Modal (image={image}, gpu={gpu}).",
+        event="jupyter_server_starting",
+        image=image,
+        gpu=gpu,
+    )
+    log.info(
+        "Modal resources: "
+        f"cpu={cpu}, memory={memory}, timeout={options.timeout}s, "
+        f"pip_packages={len(options.pip_packages)}, apt_packages={len(options.apt_packages)}, "
+        f"secrets={len(options.secrets)}, volumes={len(options.volumes)}, "
+        f"workdir={options.workdir}.",
+        event="modal_resources",
+        cpu=cpu,
+        memory=memory,
+        timeout=options.timeout,
+        pip_packages=len(options.pip_packages),
+        apt_packages=len(options.apt_packages),
+        secrets=len(options.secrets),
+        volumes=len(options.volumes),
+        workdir=options.workdir,
+    )
+    log.info("Modal setup and Jupyter server preparation started.", event="modal_setup_started")
+    log.info(
+        "Keep this command running while VS Code or the browser is connected.",
+        event="jupyter_server_hint",
+    )
+
+
+def _print_server_ready(
+    console: Console,
+    log: TerminalLog,
+    event: dict[str, Any],
+    *,
+    mode: OutputMode,
+) -> None:
+    jupyter_url = str(event.get("jupyter_url", ""))
+    vscode_url = str(event.get("vscode_url", ""))
+    notebook_path = str(event.get("notebook_path", ""))
+    if mode == "modern":
+        print_key_value_panel(
+            console,
+            "[green]Remote Jupyter ready[/green]",
+            [
+                ("JupyterLab URL", jupyter_url),
+                ("VS Code server URL", vscode_url),
+                ("Remote notebook", notebook_path),
+            ],
+            border_style="green",
+        )
+    log.info(
+        f"Remote Jupyter server is ready: {vscode_url}",
+        event="jupyter_server_ready",
+        jupyter_url=jupyter_url,
+        vscode_url=vscode_url,
+        notebook_path=notebook_path,
     )
 
 
@@ -1388,12 +1569,19 @@ def _resolve_output_mode(*, verbose: bool, plain: bool, jsonl: bool) -> OutputMo
     return "modern"
 
 
-def _print_run_header(console: Console, input_path: Path, *, mode: OutputMode) -> None:
-    if mode == "modern":
+def _print_run_header(
+    console: Console,
+    input_path: Path,
+    *,
+    output_mode: OutputMode,
+    run_mode: RunMode,
+) -> None:
+    if output_mode == "modern":
+        mode_label = "remote Modal execution" if run_mode == "execute" else "remote Jupyter server"
         print_key_value_panel(
             console,
             "[bold cyan]Runbook[/bold cyan]",
-            [("Notebook", str(input_path)), ("Mode", "remote Modal execution")],
+            [("Notebook", str(input_path)), ("Mode", mode_label)],
             border_style="cyan",
         )
 
