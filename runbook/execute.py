@@ -281,6 +281,7 @@ def _cell_output_event(
         "notebook_cell": notebook_index + 1,
         "total_cells": total_cells,
         "output_type": output_type,
+        "output": _plain_json(output),
     }
 
     if output_type == "stream":
@@ -298,6 +299,18 @@ def _cell_output_event(
     if "text" not in event:
         return None
     return cast(Event, event)
+
+
+def _plain_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _plain_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_plain_json(item) for item in value]
+    if isinstance(value, tuple):
+        return [_plain_json(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
 
 
 def _truncate_output_text(text: str, *, max_chars: int = 4000) -> str:

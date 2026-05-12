@@ -118,6 +118,9 @@ def test_stream_outputs_are_reported_before_cell_finished():
     assert output["output_type"] == "stream"
     assert output["name"] == "stdout"
     assert "before" in output["text"]
+    assert output["output"]["output_type"] == "stream"
+    assert output["output"]["name"] == "stdout"
+    assert "before" in output["output"]["text"]
 
 
 def test_startup_failure_is_reported_distinctly():

@@ -251,6 +251,19 @@ def main(
 
     _print_remote_execution_start(console, log, options, mode=mode)
 
+    live_notebook = LiveNotebookWriter(
+        converted.notebook_json,
+        output_path,
+        requirements_result=requirements_result,
+        options=options,
+    )
+    live_notebook.write(status="pending", completed=0, total_cells=0, debug=None)
+    log.info(
+        f"Initialized live output notebook at {output_path}.",
+        event="live_notebook_initialized",
+        output_path=str(output_path),
+    )
+
     notebook_data: str | None = None
     debug: dict | None = None
     failure: dict | None = None
@@ -282,6 +295,12 @@ def main(
                         total_cells = int(event_data.get("total_cells", 0))
                         event_debug = event_data.get("debug")
                         debug = event_debug if isinstance(event_debug, dict) else debug
+                        live_notebook.write(
+                            status="running",
+                            completed=0,
+                            total_cells=total_cells,
+                            debug=debug,
+                        )
                         print_debug_info(console, "Modal run started", debug, mode=mode)
                         log.event("modal_started", total_cells=total_cells, debug=debug or {})
                         log.info(
@@ -296,6 +315,7 @@ def main(
                         event_total = int(event_data.get("total_cells", total_cells))
                         cell_started_at[cell] = perf_counter()
                         source_preview = str(event_data.get("source_preview") or "").strip()
+                        live_notebook.cell_started(event_data, completed=completed, debug=debug)
                         log.info(
                             f"Cell {cell}/{event_total} started.",
                             event="cell_started",
@@ -327,6 +347,11 @@ def main(
                             completed=completed,
                             elapsed=elapsed.strip(),
                         )
+                        live_notebook.cell_finished(
+                            event_data,
+                            status=str(event_data.get("status", "ok")),
+                            debug=debug,
+                        )
                         progress.update(completed, total_cells, status="ok")
                     elif kind == "cell_failed":
                         cell = int(event_data.get("cell", 0))
@@ -351,10 +376,17 @@ def main(
                             allowed_error_count += 1
                         else:
                             failure = event_data
+                        live_notebook.cell_failed(
+                            event_data,
+                            completed=completed,
+                            debug=debug,
+                        )
                     elif kind == "cell_output":
+                        live_notebook.cell_output(event_data, completed=completed, debug=debug)
                         _print_cell_output(console, log, event_data, mode=mode)
                     elif kind == "startup_failed":
                         startup_failure = event_data
+                        live_notebook.startup_failed(event_data, debug=debug)
                         log.info(
                             "Notebook startup failed before cell execution: "
                             f"{event_data.get('error_type')}: {event_data.get('message')}",
@@ -373,6 +405,12 @@ def main(
                                 event="remote_execution_finished",
                             )
                         progress.update(completed, total_cells, status="complete")
+                        live_notebook.write(
+                            status="finished",
+                            completed=completed,
+                            total_cells=total_cells,
+                            debug=debug,
+                        )
                     elif kind == "notebook":
                         if event_data.get("format") == "ipynb-json":
                             status = _notebook_status(
@@ -389,6 +427,7 @@ def main(
                                 completed=completed,
                                 total_cells=total_cells,
                             )
+                            live_notebook.replace_with_final(notebook_data)
                             log.info(
                                 "Received output notebook payload "
                                 f"({_format_bytes(len(notebook_data.encode('utf-8')))}).",
@@ -424,6 +463,8 @@ def main(
         )
 
     wrote_output = _write_notebook_if_available(output_path, notebook_data, log)
+    if not wrote_output and output_path.exists():
+        wrote_output = True
     written_path = output_path if wrote_output else None
 
     if startup_failure is not None:
@@ -858,6 +899,274 @@ def _attach_run_manifest(
         },
     }
     return nbformat.writes(notebook)
+
+
+class LiveNotebookWriter:
+    """Maintains the output notebook on disk while remote execution is still running."""
+
+    def __init__(
+        self,
+        notebook_json: str,
+        output_path: Path,
+        *,
+        requirements_result: RequirementsLoadResult,
+        options: ModalRunOptions,
+    ) -> None:
+        self._notebook = nbformat.reads(notebook_json, as_version=4)
+        self._output_path = output_path
+        self._requirements_result = requirements_result
+        self._options = options
+        self._clear_outputs()
+
+    def write(
+        self,
+        *,
+        status: str,
+        completed: int,
+        total_cells: int,
+        debug: dict | None,
+        current_cell: int | None = None,
+        current_notebook_cell: int | None = None,
+    ) -> None:
+        self._set_metadata(
+            status=status,
+            completed=completed,
+            total_cells=total_cells,
+            debug=debug,
+            current_cell=current_cell,
+            current_notebook_cell=current_notebook_cell,
+        )
+        atomic_write_text(self._output_path, nbformat.writes(self._notebook))
+
+    def cell_started(
+        self,
+        event: dict[str, Any],
+        *,
+        completed: int,
+        debug: dict | None,
+    ) -> None:
+        cell_index = _event_notebook_index(event)
+        if cell_index is None:
+            return
+        cell = self._notebook.cells[cell_index]
+        cell.metadata["runbook"] = {
+            "execution_state": "running",
+            "executable_cell": event.get("cell"),
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "source_preview": event.get("source_preview", ""),
+        }
+        if cell.get("cell_type") == "code":
+            cell["execution_count"] = event.get("cell")
+        self.write(
+            status="running",
+            completed=completed,
+            total_cells=int(event.get("total_cells", 0)),
+            debug=debug,
+            current_cell=_optional_event_int(event, "cell"),
+            current_notebook_cell=_optional_event_int(event, "notebook_cell"),
+        )
+
+    def cell_output(
+        self,
+        event: dict[str, Any],
+        *,
+        completed: int,
+        debug: dict | None,
+    ) -> None:
+        cell_index = _event_notebook_index(event)
+        if cell_index is None:
+            return
+        output = event.get("output")
+        if isinstance(output, dict):
+            self._notebook.cells[cell_index].outputs.append(nbformat.from_dict(output))
+        else:
+            self._notebook.cells[cell_index].outputs.append(
+                _synthetic_output_from_event(event)
+            )
+        self.write(
+            status="running",
+            completed=completed,
+            total_cells=int(event.get("total_cells", 0)),
+            debug=debug,
+            current_cell=_optional_event_int(event, "cell"),
+            current_notebook_cell=_optional_event_int(event, "notebook_cell"),
+        )
+
+    def cell_failed(
+        self,
+        event: dict[str, Any],
+        *,
+        completed: int,
+        debug: dict | None,
+    ) -> None:
+        cell_index = _event_notebook_index(event)
+        if cell_index is None:
+            return
+        cell = self._notebook.cells[cell_index]
+        cell.metadata["runbook"] = {
+            **dict(cell.metadata.get("runbook", {})),
+            "execution_state": "allowed_error" if event.get("allowed") else "failed",
+            "error_type": event.get("error_type"),
+            "message": event.get("message"),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if not _cell_has_error_output(cell, event):
+            cell.outputs.append(
+                nbformat.v4.new_output(
+                    "error",
+                    ename=str(event.get("error_type", "")),
+                    evalue=str(event.get("message", "")),
+                    traceback=str(event.get("traceback", "")).splitlines(),
+                )
+            )
+        self.write(
+            status="running" if event.get("allowed") else "failed",
+            completed=completed,
+            total_cells=int(event.get("total_cells", 0)),
+            debug=debug,
+            current_cell=_optional_event_int(event, "cell"),
+            current_notebook_cell=_optional_event_int(event, "notebook_cell"),
+        )
+
+    def cell_finished(
+        self,
+        event: dict[str, Any],
+        *,
+        status: str,
+        debug: dict | None,
+    ) -> None:
+        cell_index = _event_notebook_index(event)
+        if cell_index is not None:
+            cell = self._notebook.cells[cell_index]
+            cell.metadata["runbook"] = {
+                **dict(cell.metadata.get("runbook", {})),
+                "execution_state": "error" if status == "error" else "finished",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
+        self.write(
+            status="running",
+            completed=int(event.get("completed", 0)),
+            total_cells=int(event.get("total_cells", 0)),
+            debug=debug,
+            current_cell=None,
+            current_notebook_cell=None,
+        )
+
+    def startup_failed(self, event: dict[str, Any], *, debug: dict | None) -> None:
+        self._notebook.metadata["runbook_startup_error"] = {
+            "error_type": event.get("error_type"),
+            "message": event.get("message"),
+            "traceback": event.get("traceback"),
+        }
+        self.write(status="startup_failed", completed=0, total_cells=0, debug=debug)
+
+    def replace_with_final(self, notebook_json: str) -> None:
+        self._notebook = nbformat.reads(notebook_json, as_version=4)
+        atomic_write_text(self._output_path, notebook_json)
+
+    def _clear_outputs(self) -> None:
+        for index, cell in enumerate(self._notebook.cells, start=1):
+            if cell.get("cell_type") != "code":
+                continue
+            cell["outputs"] = []
+            cell["execution_count"] = None
+            cell.metadata["runbook"] = {
+                "execution_state": "pending",
+                "notebook_cell": index,
+            }
+
+    def _set_metadata(
+        self,
+        *,
+        status: str,
+        completed: int,
+        total_cells: int,
+        debug: dict | None,
+        current_cell: int | None,
+        current_notebook_cell: int | None,
+    ) -> None:
+        requirements = self._requirements_result.requirements
+        self._notebook.metadata["runbook"] = {
+            "schema_version": 1,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "status": status,
+            "live_update": True,
+            "current_cell": current_cell,
+            "current_notebook_cell": current_notebook_cell,
+            "completed_cells": completed,
+            "total_cells": total_cells,
+            "requirements_path": str(self._requirements_result.path),
+            "requirements_generated": self._requirements_result.generated,
+            "planner": {
+                "provider": requirements.planner.provider,
+                "model": requirements.planner.model,
+                "confidence": requirements.planner.confidence,
+                "notes": list(requirements.planner.notes),
+                "source_hash": requirements.planner.source_hash,
+            },
+            "runtime": {
+                "image": self._options.image,
+                "gpu": self._options.gpu,
+                "cpu": self._options.cpu,
+                "memory": self._options.memory,
+                "timeout": self._options.timeout,
+                "kernel_name": self._options.kernel_name,
+                "python_version": self._options.python_version,
+                "build_toolchain": self._options.build_toolchain,
+                "pip_index_url": self._options.pip_index_url,
+                "pip_extra_index_urls": list(self._options.pip_extra_index_urls),
+                "workdir": self._options.workdir,
+            },
+            "packages": {
+                "pip": list(self._options.pip_packages),
+                "apt": list(self._options.apt_packages),
+            },
+            "modal": {
+                "secrets": list(self._options.secrets),
+                "volumes": list(self._options.volumes),
+                "debug": debug or {},
+            },
+        }
+
+
+def _event_notebook_index(event: dict[str, Any]) -> int | None:
+    notebook_cell = _optional_event_int(event, "notebook_cell")
+    if notebook_cell is None or notebook_cell < 1:
+        return None
+    return notebook_cell - 1
+
+
+def _optional_event_int(event: dict[str, Any], key: str) -> int | None:
+    value = event.get(key)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _synthetic_output_from_event(event: dict[str, Any]) -> nbformat.NotebookNode:
+    output_type = str(event.get("output_type", "stream"))
+    text = str(event.get("text", ""))
+    if output_type == "error":
+        return nbformat.v4.new_output("error", ename="", evalue=text, traceback=[text])
+    if output_type in {"display_data", "execute_result"}:
+        return nbformat.v4.new_output(output_type, data={"text/plain": text}, metadata={})
+    return nbformat.v4.new_output(
+        "stream",
+        name=str(event.get("name", "stdout") or "stdout"),
+        text=text,
+    )
+
+
+def _cell_has_error_output(cell: nbformat.NotebookNode, event: dict[str, Any]) -> bool:
+    for output in cell.get("outputs", []):
+        if output.get("output_type") != "error":
+            continue
+        if str(output.get("ename", "")) == str(event.get("error_type", "")):
+            return True
+    return False
 
 
 def _load_or_prompt_openrouter_settings(console: Console) -> OpenRouterSettings:

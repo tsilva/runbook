@@ -57,6 +57,7 @@ class CellOutputEvent(TypedDict, total=False):
     output_type: str
     name: str
     text: str
+    output: dict[str, Any]
 
 
 class StartupFailedEvent(TypedDict):

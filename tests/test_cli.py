@@ -188,6 +188,85 @@ def test_cli_jsonl_output_is_machine_readable(monkeypatch, tmp_path):
     assert output_path.exists()
 
 
+def test_cli_streams_live_notebook_updates(monkeypatch, tmp_path):
+    input_path = tmp_path / "input.ipynb"
+    output_path = tmp_path / "output.ipynb"
+    notebook = nbformat.v4.new_notebook(
+        cells=[nbformat.v4.new_code_cell("print('old')")]
+    )
+    notebook.cells[0].outputs = [
+        nbformat.v4.new_output("stream", name="stdout", text="old\n")
+    ]
+    nbformat.write(notebook, input_path)
+    final_notebook = nbformat.v4.new_notebook(
+        cells=[nbformat.v4.new_code_cell("print('live')")]
+    )
+    final_notebook.cells[0].outputs = [
+        nbformat.v4.new_output("stream", name="stdout", text="live\n")
+    ]
+    _patch_requirements(monkeypatch)
+
+    def read_live():
+        return nbformat.read(output_path, as_version=4)
+
+    def fake_stream(notebook_json, options):
+        yield {"event": "started", "total_cells": 1, "debug": {}}
+        assert read_live().cells[0].outputs == []
+        yield {
+            "event": "cell_started",
+            "cell": 1,
+            "notebook_cell": 1,
+            "total_cells": 1,
+            "source_preview": "print('live')",
+        }
+        live = read_live()
+        assert live.metadata["runbook"]["current_cell"] == 1
+        assert live.cells[0].metadata["runbook"]["execution_state"] == "running"
+        yield {
+            "event": "cell_output",
+            "cell": 1,
+            "notebook_cell": 1,
+            "total_cells": 1,
+            "output_type": "stream",
+            "name": "stdout",
+            "text": "live\n",
+            "output": {
+                "output_type": "stream",
+                "name": "stdout",
+                "text": "live\n",
+            },
+        }
+        live = read_live()
+        assert live.cells[0].outputs[0].text == "live\n"
+        assert live.metadata["runbook"]["current_notebook_cell"] == 1
+        yield {
+            "event": "cell_finished",
+            "cell": 1,
+            "notebook_cell": 1,
+            "completed": 1,
+            "total_cells": 1,
+            "status": "ok",
+        }
+        live = read_live()
+        assert live.cells[0].metadata["runbook"]["execution_state"] == "finished"
+        assert live.metadata["runbook"]["current_cell"] is None
+        yield {"event": "finished", "completed": 1, "total_cells": 1}
+        yield {
+            "event": "notebook",
+            "format": "ipynb-json",
+            "data": nbformat.writes(final_notebook),
+        }
+
+    monkeypatch.setattr("runbook.cli.stream_remote_events", fake_stream)
+
+    result = runner.invoke(app, [str(input_path), "--output", str(output_path)])
+
+    assert result.exit_code == 0, result.output
+    written = nbformat.read(output_path, as_version=4)
+    assert written.cells[0].outputs[0].text == "live\n"
+    assert written.metadata["runbook"]["status"] == "finished"
+
+
 def test_cli_cell_failure_writes_partial_and_exits_nonzero(monkeypatch, tmp_path):
     input_path = tmp_path / "input.ipynb"
     output_path = tmp_path / "output.ipynb"
