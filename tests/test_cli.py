@@ -117,3 +117,44 @@ def test_cli_startup_failure_is_distinct(monkeypatch, tmp_path):
     assert result.exit_code != 0
     assert "Notebook startup failed before cell execution" in result.output
     assert "Failed at executable cell" not in result.output
+
+
+def test_modal_image_includes_build_toolchain():
+    from runbook.modal_app import _build_image
+
+    class FakeImage:
+        def __init__(self):
+            self.calls = []
+
+        def apt_install(self, *packages):
+            self.calls.append(("apt_install", packages))
+            return self
+
+        def pip_install(self, *packages):
+            self.calls.append(("pip_install", packages))
+            return self
+
+        def add_local_python_source(self, package):
+            self.calls.append(("add_local_python_source", package))
+            return self
+
+    class FakeImageFactory:
+        def __init__(self, image):
+            self.image = image
+
+        def from_registry(self, image_name):
+            self.image.calls.append(("from_registry", image_name))
+            return self.image
+
+        def debian_slim(self, python_version):
+            self.image.calls.append(("debian_slim", python_version))
+            return self.image
+
+    class FakeModal:
+        def __init__(self, image):
+            self.Image = FakeImageFactory(image)
+
+    image = FakeImage()
+    _build_image(FakeModal(image), "pytorch/pytorch:example")
+
+    assert ("apt_install", ("build-essential",)) in image.calls

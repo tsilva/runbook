@@ -108,8 +108,10 @@ def _build_image(modal: Any, image_name: str | None) -> Any:
         image = modal.Image.from_registry(image_name)
     else:
         image = modal.Image.debian_slim(python_version="3.11")
-    return image.pip_install("nbformat", "nbclient", "ipykernel").add_local_python_source(
-        "runbook"
+    return (
+        image.apt_install("build-essential")
+        .pip_install("nbformat", "nbclient", "ipykernel")
+        .add_local_python_source("runbook")
     )
 
 
