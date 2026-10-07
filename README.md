@@ -1,8 +1,10 @@
-<div align="center">
+<p align="center">
   <img src="./logo.png" alt="Runbook logo" width="520" />
-
-  **📓 Execute notebooks on remote Modal compute 📓**
-</div>
+  <br />
+  <!-- repo-tagline:start -->
+  <strong>📓 Execute notebooks on remote Modal compute 📓</strong>
+  <!-- repo-tagline:end -->
+</p>
 
 Runbook is a Python CLI that runs a local Jupyter notebook remotely on Modal and
 writes notebook artifacts back to disk. While execution is active, outputs stream
