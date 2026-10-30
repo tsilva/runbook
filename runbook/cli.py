@@ -52,8 +52,6 @@ from runbook.settings import (
     OpenRouterSettings,
     init_settings_dir,
     load_openrouter_settings,
-    runbook_env_path,
-    save_openrouter_settings,
 )
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -256,8 +254,8 @@ def main(
 
     if run_mode == "execute":
         requested_output_path = (
-            output or default_output_path(converted.source_path)
-        ).expanduser().resolve()
+            (output or default_output_path(converted.source_path)).expanduser().resolve()
+        )
         running_output_path, finished_output_path = _run_output_paths(requested_output_path)
         output_paths = [running_output_path, finished_output_path]
     else:
@@ -687,9 +685,7 @@ def _merge_options(
         python_version=python_version
         if python_version is not None
         else runtime.python_version or DEFAULT_PYTHON_VERSION,
-        build_toolchain=build_toolchain
-        if build_toolchain is not None
-        else runtime.build_toolchain,
+        build_toolchain=build_toolchain if build_toolchain is not None else runtime.build_toolchain,
         pip_index_url=pip_index_url if pip_index_url is not None else runtime.pip_index_url,
         pip_extra_index_urls=_dedupe(
             [*runtime.pip_extra_index_urls, *(pip_extra_index_urls or [])]
@@ -763,12 +759,10 @@ def _load_or_create_requirements(
 
     settings_started = perf_counter()
     settings = _load_or_prompt_openrouter_settings(console)
-    log.done("OpenRouter settings resolved", settings_started)
+    log.done("AgentBridge settings resolved", settings_started)
     if settings.api_key:
         started = perf_counter()
-        log.info(
-            f"Generating execution requirements with OpenRouter ({settings.model})."
-        )
+        log.info(f"Generating execution requirements through AgentBridge ({settings.model}).")
         result = load_or_generate_requirements(
             input_path,
             notebook_json,
@@ -787,9 +781,7 @@ def _load_or_create_requirements(
 
 
 def _missing_requirements_message(input_path: Path, requirements_path: Path) -> str:
-    command = (
-        f"runbook {shlex.quote(str(input_path))} --generate-requirements --dry-run"
-    )
+    command = f"runbook {shlex.quote(str(input_path))} --generate-requirements --dry-run"
     return (
         f"Companion requirements file does not exist: {requirements_path}\n"
         "Runbook will not call the LLM automatically. To generate it with the "
@@ -1218,9 +1210,7 @@ class LiveNotebookWriter:
         if isinstance(output, dict):
             self._notebook.cells[cell_index].outputs.append(nbformat.from_dict(output))
         else:
-            self._notebook.cells[cell_index].outputs.append(
-                _synthetic_output_from_event(event)
-            )
+            self._notebook.cells[cell_index].outputs.append(_synthetic_output_from_event(event))
         self.write(
             status="running",
             completed=completed,
@@ -1434,30 +1424,8 @@ def _cell_has_error_output(cell: nbformat.NotebookNode, event: dict[str, Any]) -
 
 
 def _load_or_prompt_openrouter_settings(console: Console) -> OpenRouterSettings:
-    init_settings_dir()
-    settings = load_openrouter_settings()
-    if settings.api_key:
-        return settings
-
-    console.print(
-        f"No OpenRouter settings found. Runbook stores them in {runbook_env_path()}."
-    )
-    api_key = typer.prompt(
-        "OpenRouter API key",
-        default="",
-        hide_input=True,
-        show_default=False,
-    ).strip()
-    if not api_key:
-        return OpenRouterSettings(api_key=None, model=settings.model)
-
-    model = typer.prompt(
-        "OpenRouter model",
-        default=settings.model,
-    ).strip() or settings.model
-    settings = OpenRouterSettings(api_key=api_key, model=model)
-    save_openrouter_settings(settings)
-    return settings
+    """Resolve the gateway token and retained model without an upstream-key prompt."""
+    return load_openrouter_settings()
 
 
 def _dedupe(values: list[str]) -> list[str]:

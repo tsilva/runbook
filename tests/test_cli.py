@@ -24,9 +24,7 @@ def _runbook_config_dir(monkeypatch, tmp_path):
 
 
 def _write_input(path):
-    notebook = nbformat.v4.new_notebook(
-        cells=[nbformat.v4.new_code_cell("print('hello')")]
-    )
+    notebook = nbformat.v4.new_notebook(cells=[nbformat.v4.new_code_cell("print('hello')")])
     nbformat.write(notebook, path)
     return notebook
 
@@ -273,16 +271,10 @@ def test_cli_jsonl_output_is_machine_readable(monkeypatch, tmp_path):
 def test_cli_streams_live_notebook_updates(monkeypatch, tmp_path):
     input_path = tmp_path / "input.ipynb"
     output_path = tmp_path / "output.ipynb"
-    notebook = nbformat.v4.new_notebook(
-        cells=[nbformat.v4.new_code_cell("print('old')")]
-    )
-    notebook.cells[0].outputs = [
-        nbformat.v4.new_output("stream", name="stdout", text="old\n")
-    ]
+    notebook = nbformat.v4.new_notebook(cells=[nbformat.v4.new_code_cell("print('old')")])
+    notebook.cells[0].outputs = [nbformat.v4.new_output("stream", name="stdout", text="old\n")]
     nbformat.write(notebook, input_path)
-    final_notebook = nbformat.v4.new_notebook(
-        cells=[nbformat.v4.new_code_cell("print('live')")]
-    )
+    final_notebook = nbformat.v4.new_notebook(cells=[nbformat.v4.new_code_cell("print('live')")])
     final_notebook.cells[0].outputs = [
         nbformat.v4.new_output("stream", name="stdout", text="live\n")
     ]
@@ -475,7 +467,7 @@ def test_cli_without_llm_requires_image_for_manual_settings(monkeypatch, tmp_pat
     input_path = tmp_path / "input.ipynb"
     _write_input(input_path)
     monkeypatch.setenv("RUNBOOK_CONFIG_DIR", str(tmp_path / "config"))
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("AGENTBRIDGE_API_KEY", raising=False)
     monkeypatch.delenv("RUNBOOK_OPENROUTER_MODEL", raising=False)
 
     result = runner.invoke(app, [str(input_path)])
@@ -494,7 +486,7 @@ def test_cli_without_llm_uses_manual_flag_settings(monkeypatch, tmp_path):
     output_path = tmp_path / "output.ipynb"
     notebook = _write_input(input_path)
     monkeypatch.setenv("RUNBOOK_CONFIG_DIR", str(tmp_path / "config"))
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("AGENTBRIDGE_API_KEY", raising=False)
     monkeypatch.delenv("RUNBOOK_OPENROUTER_MODEL", raising=False)
 
     def fake_stream(notebook_json, options):
@@ -534,11 +526,11 @@ def test_cli_prompts_for_openrouter_settings_and_writes_yaml(monkeypatch, tmp_pa
     output_path = tmp_path / "output.ipynb"
     notebook = _write_input(input_path)
     monkeypatch.setenv("RUNBOOK_CONFIG_DIR", str(tmp_path / "config"))
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("AGENTBRIDGE_API_KEY", raising=False)
     monkeypatch.delenv("RUNBOOK_OPENROUTER_MODEL", raising=False)
 
     def fake_openrouter(notebook_text, model, *, api_key=None):
-        assert api_key == "sk-test"
+        assert api_key == "not-needed"
         assert model == "openai/gpt-5.5"
         return {
             "version": 1,
@@ -588,11 +580,11 @@ def test_cli_generate_requirements_flag_prompts_and_writes_yaml(monkeypatch, tmp
     output_path = tmp_path / "output.ipynb"
     notebook = _write_input(input_path)
     monkeypatch.setenv("RUNBOOK_CONFIG_DIR", str(tmp_path / "config"))
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("AGENTBRIDGE_API_KEY", raising=False)
     monkeypatch.delenv("RUNBOOK_OPENROUTER_MODEL", raising=False)
 
     def fake_openrouter(notebook_text, model, *, api_key=None):
-        assert api_key == "sk-test"
+        assert api_key == "not-needed"
         assert model == "openai/gpt-5.5"
         return {
             "version": 1,
@@ -631,12 +623,12 @@ def test_cli_generate_requirements_flag_prompts_and_writes_yaml(monkeypatch, tmp
     )
 
     assert result.exit_code == 0, result.output
-    assert "Generating execution requirements with OpenRouter (openai/gpt-5.5)" in result.output
+    assert "Generating execution requirements through AgentBridge (openai/gpt-5.5)" in result.output
     assert "Wrote execution requirements" in result.output
     assert "Starting remote execution on Modal (image=python:3.11, gpu=none)" in result.output
     assert "Image setup can take a few minutes" in result.output
     assert input_path.with_name("input.ipynb.yaml").exists()
-    assert (tmp_path / "config" / ".env").exists()
+    assert not (tmp_path / "config" / ".env").exists()
 
 
 def test_modal_image_includes_build_toolchain():

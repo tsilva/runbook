@@ -16,6 +16,7 @@ from typing import Any
 import nbformat
 import yaml
 
+from runbook.agentbridge import base_url, model_id
 from runbook.files import atomic_write_text
 
 DEFAULT_TIMEOUT = 3600
@@ -27,7 +28,7 @@ DEFAULT_OPENROUTER_MAX_COMPLETION_TOKENS = 16000
 DEFAULT_OPENROUTER_RETRIES = 2
 DEFAULT_OPENROUTER_TIMEOUT_SECONDS = 120
 DEFAULT_OPENROUTER_MAX_NOTEBOOK_CHARS = 200_000
-OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
+AGENTBRIDGE_CHAT_COMPLETIONS_URL = "http://127.0.0.1:8082/api/v1/chat/completions"
 RequirementsPlanner = Callable[[str, str, str | None], dict[str, Any]]
 BUILD_TOOLCHAIN_PIP_PACKAGES = {
     "bitsandbytes",
@@ -318,9 +319,7 @@ def requirements_summary_lines(requirements: NotebookRequirements) -> list[str]:
     gpu = runtime.gpu or "none"
     cpu = runtime.cpu if runtime.cpu is not None else "default"
     memory = f"{runtime.memory} MiB" if runtime.memory is not None else "default"
-    confidence = (
-        f"{planner.confidence:.2f}" if planner.confidence is not None else "unknown"
-    )
+    confidence = f"{planner.confidence:.2f}" if planner.confidence is not None else "unknown"
     lines = [
         f"Planner: provider={planner.provider}, model={planner.model}, confidence={confidence}",
         (
@@ -384,14 +383,10 @@ def _call_openrouter(
     retries: int = DEFAULT_OPENROUTER_RETRIES,
     timeout_seconds: int = DEFAULT_OPENROUTER_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    selected_api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
-    if not selected_api_key:
-        raise RequirementsConfigError(
-            "No companion requirements file was found and OPENROUTER_API_KEY is not set."
-        )
+    selected_api_key = api_key or os.environ.get("AGENTBRIDGE_API_KEY") or "not-needed"
 
     payload = {
-        "model": model,
+        "model": model_id(model),
         "temperature": 0,
         "max_completion_tokens": DEFAULT_OPENROUTER_MAX_COMPLETION_TOKENS,
         "reasoning": {
@@ -458,7 +453,7 @@ def _openrouter_request_with_retries(
     attempts = max(retries, 0) + 1
     for attempt in range(attempts):
         request = urllib.request.Request(
-            os.environ.get("RUNBOOK_OPENROUTER_URL", OPENROUTER_CHAT_COMPLETIONS_URL),
+            f"{base_url()}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {api_key}",
@@ -503,10 +498,7 @@ def _parse_openrouter_completion(completion: dict[str, Any]) -> dict[str, Any]:
         content = "".join(_content_part_text(item) for item in content)
     if not isinstance(content, str) or not content.strip():
         finish_reason = choice.get("finish_reason")
-        raise TypeError(
-            "message content is empty or not text"
-            f" (finish_reason={finish_reason!r})"
-        )
+        raise TypeError(f"message content is empty or not text (finish_reason={finish_reason!r})")
     return json.loads(_strip_json_fences(content))
 
 
@@ -607,8 +599,7 @@ def _with_planner_defaults(
     planner = PlannerMetadata(
         provider=requirements.planner.provider or "openrouter",
         model=model,
-        generated_at=requirements.planner.generated_at
-        or datetime.now(timezone.utc).isoformat(),
+        generated_at=requirements.planner.generated_at or datetime.now(timezone.utc).isoformat(),
         confidence=requirements.planner.confidence,
         notes=requirements.planner.notes,
         source_hash=source_hash,

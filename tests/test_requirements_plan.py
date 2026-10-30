@@ -179,9 +179,7 @@ def test_existing_requirements_with_mismatched_source_hash_fail(tmp_path):
                 NotebookRequirements(
                     runtime=RuntimeRequirements(image="python:3.11"),
                     modal=ModalRequirements(),
-                    planner=PlannerMetadata(
-                        source_hash=notebook_source_hash(original_notebook)
-                    ),
+                    planner=PlannerMetadata(source_hash=notebook_source_hash(original_notebook)),
                 )
             ),
             sort_keys=False,
@@ -207,9 +205,7 @@ def test_regenerate_requirements_overwrites_stale_yaml(monkeypatch, tmp_path):
         yaml.safe_dump(
             requirements_to_dict(
                 NotebookRequirements(
-                    planner=PlannerMetadata(
-                        source_hash=notebook_source_hash(original_notebook)
-                    )
+                    planner=PlannerMetadata(source_hash=notebook_source_hash(original_notebook))
                 )
             ),
             sort_keys=False,
@@ -265,7 +261,7 @@ def test_openrouter_request_uses_high_reasoning(monkeypatch):
 
     _call_openrouter("print('hello')", "openai/gpt-5.5", api_key="sk-test")
 
-    assert captured_payload["model"] == "openai/gpt-5.5"
+    assert captured_payload["model"] == "openrouter/openai/gpt-5.5"
     assert captured_payload["max_completion_tokens"] == 16000
     assert captured_payload["reasoning"] == {"effort": "high", "exclude": True}
 

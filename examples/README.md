@@ -27,3 +27,7 @@ runbook examples/pytorch_t4_jupytext_smoke.py \
 Both notebooks assert that CUDA is available, the GPU name includes `T4`, and
 PyTorch tensor, matrix multiplication, CPU/GPU comparison, and autograd
 operations succeed.
+
+## License
+
+[MIT License](../LICENSE).

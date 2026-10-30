@@ -54,7 +54,7 @@ Runbook expects a companion execution requirements file next to the notebook:
 input.ipynb.yaml
 ```
 
-If that file is missing, Runbook warns and exits without calling OpenRouter. The
+If that file is missing, Runbook warns and exits without calling AgentBridge. The
 warning includes the command to generate the file with the configured LLM:
 
 ```bash
@@ -62,10 +62,11 @@ runbook input.ipynb --generate-requirements --dry-run
 ```
 
 When generation is explicitly requested, Runbook sends a full Jupytext dump of
-the notebook to OpenRouter and asks a model to infer the Modal image, GPU,
+the notebook through AgentBridge and asks a model to infer the Modal image, GPU,
 packages, and runtime settings needed for remote execution. Runbook initializes
-`~/.config/runbook`, prompts for an OpenRouter API key and model when needed,
-and stores them in `~/.config/runbook/.env`. The default model is
+`~/.config/runbook` and reuses its saved model setting. Configure
+`AGENTBRIDGE_BASE_URL` and optional `AGENTBRIDGE_API_KEY` through the environment
+or `~/.config/runbook/.env`; generation does not prompt for an upstream key. The default model is
 `openai/gpt-5.5`. Later runs reuse the saved YAML file and do not call the model
 unless `--generate-requirements` or `--regenerate-requirements` is passed.
 Generated YAML records a source hash, so Runbook can reject stale requirements
@@ -113,6 +114,16 @@ runbook input.ipynb --image python:3.11 --pip-package pandas --apt-package git
 ## Architecture
 
 ![Runbook architecture diagram](./architecture.png)
+
+## AgentBridge routing
+
+All model requests use AgentBridge as their sole endpoint. Set
+`AGENTBRIDGE_BASE_URL` to its API root (default
+`http://127.0.0.1:8082/api/v1`). `AGENTBRIDGE_API_KEY` is an optional gateway
+access token; upstream OpenRouter credentials are managed only by AgentBridge.
+Existing model choices are preserved and gain the gateway's `openrouter/`
+namespace on requests. Image generation and embeddings require the gateway
+application routes; there is no direct-provider fallback.
 
 ## License
 

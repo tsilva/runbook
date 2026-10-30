@@ -33,7 +33,9 @@ def init_settings_dir() -> Path:
 
 def load_openrouter_settings() -> OpenRouterSettings:
     values = _read_env_file(runbook_env_path())
-    api_key = os.environ.get("OPENROUTER_API_KEY") or values.get("OPENROUTER_API_KEY")
+    api_key = (
+        os.environ.get("AGENTBRIDGE_API_KEY") or values.get("AGENTBRIDGE_API_KEY") or "not-needed"
+    )
     model = (
         os.environ.get("RUNBOOK_OPENROUTER_MODEL")
         or values.get("RUNBOOK_OPENROUTER_MODEL")
@@ -45,14 +47,13 @@ def load_openrouter_settings() -> OpenRouterSettings:
 def save_openrouter_settings(settings: OpenRouterSettings) -> None:
     init_settings_dir()
     values = {
-        "OPENROUTER_API_KEY": settings.api_key or "",
+        "AGENTBRIDGE_API_KEY": settings.api_key or "",
         "RUNBOOK_OPENROUTER_MODEL": settings.model or DEFAULT_OPENROUTER_MODEL,
     }
     path = runbook_env_path()
     atomic_write_text(
         path,
-        "\n".join(f"{key}={_escape_env_value(value)}" for key, value in values.items())
-        + "\n",
+        "\n".join(f"{key}={_escape_env_value(value)}" for key, value in values.items()) + "\n",
         mode=0o600,
     )
 
