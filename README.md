@@ -111,6 +111,13 @@ runbook input.ipynb --image python:3.11 --pip-package pandas --apt-package git
 - `--python-version`, `--build-toolchain/--no-build-toolchain`,
   `--pip-index-url`, and `--pip-extra-index-url` customize Modal image setup.
 
+## Dependency security
+
+Runbook requires `certifi>=2026.10.19` to exclude the compromised emSign trust
+chain described in [GHSA-6q48-6c7w-9gw2](https://github.com/advisories/GHSA-6q48-6c7w-9gw2).
+The requirement applies to both pip and uv installations. Keep `uv.lock` current
+and preserve the seven-day release-age delay when updating dependencies.
+
 ## Architecture
 
 ![Runbook architecture diagram](./architecture.png)
