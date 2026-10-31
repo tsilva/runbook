@@ -8,8 +8,9 @@ version = "0.1.0"
 description = "Execute Jupyter notebooks remotely on Modal and write executed ipynb files locally."
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
+  "aiohttp>=3.14.4",
   "certifi>=2026.10.19",
   "ipykernel",
   "jupytext",
@@ -18,6 +19,7 @@ dependencies = [
   "nbformat",
   "PyYAML",
   "rich",
+  "tornado>=6.6",
   "typer",
 ]
 
@@ -50,7 +52,7 @@ extend-exclude = ["examples"]
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 ignore_missing_imports = true
 disable_error_code = ["import-untyped"]
 warn_unused_ignores = true

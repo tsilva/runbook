@@ -357,6 +357,13 @@ def _build_image(
     pip_extra_index_urls: list[str] | None = None,
     include_jupyter: bool = False,
 ) -> Any:
+    if not image_name:
+        try:
+            version = tuple(int(part) for part in python_version.split(".")[:2])
+        except ValueError as exc:
+            raise ModalSetupError("Default Modal images require Python 3.11 or newer.") from exc
+        if len(version) != 2 or version < (3, 11):
+            raise ModalSetupError("Default Modal images require Python 3.11 or newer.")
     if image_name:
         image = modal.Image.from_registry(image_name)
     else:
@@ -364,7 +371,16 @@ def _build_image(
     base_apt = ["build-essential"] if build_toolchain else []
     apt = _dedupe([*base_apt, *(apt_packages or [])])
     jupyter_packages = ["jupyterlab"] if include_jupyter else []
-    pip = _dedupe(["nbformat", "nbclient", "ipykernel", *jupyter_packages, *(pip_packages or [])])
+    pip = _dedupe(
+        [
+            "nbformat",
+            "nbclient",
+            "ipykernel",
+            "tornado>=6.6",
+            *jupyter_packages,
+            *(pip_packages or []),
+        ]
+    )
     if apt:
         image = image.apt_install(*apt)
     pip_kwargs: dict[str, Any] = {}

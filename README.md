@@ -17,6 +17,8 @@ requests, secrets, volumes, or a custom registry image.
 
 ## Install
 
+Python 3.11 or newer is required.
+
 ```bash
 git clone https://github.com/tsilva/runbook.git
 cd runbook
@@ -117,6 +119,12 @@ Runbook requires `certifi>=2026.10.19` to exclude the compromised emSign trust
 chain described in [GHSA-6q48-6c7w-9gw2](https://github.com/advisories/GHSA-6q48-6c7w-9gw2).
 The requirement applies to both pip and uv installations. Keep `uv.lock` current
 and preserve the seven-day release-age delay when updating dependencies.
+
+Runbook also requires `aiohttp>=3.14.4` and `tornado>=6.6` for the patched HTTP
+handling in those libraries. Tornado 6.6 requires Python 3.11 or newer, so Python
+3.10 is no longer supported. Generated Modal notebook images enforce the Tornado
+minimum for both execution and JupyterLab. Custom registry images must provide
+Python 3.11 or newer; conflicting notebook package pins fail dependency resolution.
 
 ## Architecture
 

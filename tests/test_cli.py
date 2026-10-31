@@ -680,7 +680,7 @@ def test_modal_image_includes_build_toolchain():
     assert ("apt_install", ("build-essential", "ffmpeg")) in image.calls
     assert (
         "pip_install",
-        ("nbformat", "nbclient", "ipykernel", "torch"),
+        ("nbformat", "nbclient", "ipykernel", "tornado>=6.6", "torch"),
         {
             "index_url": "https://example.test/simple",
             "extra_index_url": ["https://extra.example.test/simple"],
@@ -733,9 +733,50 @@ def test_modal_image_includes_jupyterlab_for_server_mode():
 
     assert (
         "pip_install",
-        ("nbformat", "nbclient", "ipykernel", "jupyterlab", "pandas"),
+        ("nbformat", "nbclient", "ipykernel", "tornado>=6.6", "jupyterlab", "pandas"),
         {},
     ) in image.calls
+
+
+@pytest.mark.parametrize("version", ["2.7", "3.9", "3.10", "3.10.16", "3", "invalid"])
+def test_default_modal_image_rejects_unsupported_python(version):
+    from runbook.modal_app import ModalSetupError, _build_image
+
+    # Rejection must happen before touching the Modal image factory.
+    with pytest.raises(ModalSetupError, match=r"Python 3\.11"):
+        _build_image(object(), None, python_version=version)
+
+
+@pytest.mark.parametrize("registry", [None, "python:3.11"])
+@pytest.mark.parametrize("serve", [False, True])
+def test_modal_image_keeps_security_floor_with_conflicting_notebook_pin(registry, serve):
+    from types import SimpleNamespace
+
+    from runbook.modal_app import _build_image
+
+    class Image:
+        def apt_install(self, *packages):
+            return self
+
+        def pip_install(self, *packages, **kwargs):
+            self.packages = packages
+            return self
+
+        def add_local_python_source(self, name):
+            return self
+
+    image = Image()
+    modal = SimpleNamespace(
+        Image=SimpleNamespace(from_registry=lambda name: image, debian_slim=lambda **kw: image)
+    )
+    result = _build_image(
+        modal, registry, pip_packages=["tornado==6.5.10"], include_jupyter=serve
+    )
+
+    assert result is image
+    assert "tornado>=6.6" in image.packages
+    assert "tornado==6.5.10" in image.packages
+    assert ("jupyterlab" in image.packages) is serve
 
 
 def test_cli_runtime_flags_reach_modal_options(monkeypatch, tmp_path):
