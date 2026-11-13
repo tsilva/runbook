@@ -32,6 +32,27 @@ def _notebook_json(source: str = "import pandas as pd"):
     return nbformat.writes(notebook)
 
 
+def test_planning_cli_writes_requirements_without_importing_executor(monkeypatch, tmp_path, capsys):
+    import sys
+    from runbook import requirements_plan
+
+    notebook = tmp_path / "synthetic.ipynb"
+    notebook.write_text(_notebook_json("raise RuntimeError('must never execute')"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["runbook-plan", str(notebook)])
+    calls = []
+    def generate(source):
+        calls.append(source)
+        return NotebookRequirements()
+    monkeypatch.setattr(requirements_plan, "generate_requirements", generate)
+    before = sys.modules.get("runbook.modal_app")
+    assert requirements_plan.main() == 0
+    assert len(calls) == 1 and "must never execute" in calls[0]
+    assert sys.modules.get("runbook.modal_app") is before
+    assert yaml.safe_load((tmp_path / "synthetic.ipynb.yaml").read_text())["version"] == 1
+    assert json.loads(capsys.readouterr().out)["notebook_executed"] is False
+
+
 def test_load_or_generate_uses_existing_companion_without_llm(monkeypatch, tmp_path):
     input_path = tmp_path / "analysis.ipynb"
     input_path.write_text(_notebook_json(), encoding="utf-8")

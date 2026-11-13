@@ -50,6 +50,9 @@ python3 -m pytest  # run tests from a dev environment with pytest installed
 
 CPU execution is the default when `--gpu` is omitted.
 
+For planning alone, `runbook-plan input.ipynb` writes a requirements plan in the
+current directory without importing the execution CLI or running notebook code.
+
 Runbook expects a companion execution requirements file next to the notebook:
 
 ```text

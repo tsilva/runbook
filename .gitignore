@@ -10,3 +10,5 @@ dist/
 build/
 runs/
 *.executed.ipynb
+
+/.internal/

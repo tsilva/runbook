@@ -32,6 +32,7 @@ test = [
 ]
 
 [project.scripts]
+runbook-plan = "runbook.requirements_plan:main"
 runbook = "runbook.cli:app"
 
 [tool.setuptools.packages.find]
