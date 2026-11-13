@@ -34,6 +34,7 @@ def _notebook_json(source: str = "import pandas as pd"):
 
 def test_planning_cli_writes_requirements_without_importing_executor(monkeypatch, tmp_path, capsys):
     import sys
+
     from runbook import requirements_plan
 
     notebook = tmp_path / "synthetic.ipynb"

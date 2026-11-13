@@ -751,11 +751,17 @@ def main() -> int:
     """Generate a requirements plan without importing or running the executor."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Plan notebook requirements without executing the notebook")
+    parser = argparse.ArgumentParser(
+        description="Plan notebook requirements without executing the notebook"
+    )
     parser.add_argument("notebook", type=Path)
     arguments = parser.parse_args()
     plan = generate_requirements(arguments.notebook.read_text())
     target = Path.cwd() / (arguments.notebook.name + ".yaml")
     target.write_text(yaml.safe_dump(requirements_to_dict(plan), sort_keys=False))
-    print(json.dumps({"ok": True, "planned_only": True, "notebook_executed": False, "output": target.name}))
+    print(
+        json.dumps(
+            {"ok": True, "planned_only": True, "notebook_executed": False, "output": target.name}
+        )
+    )
     return 0
