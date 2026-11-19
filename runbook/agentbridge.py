@@ -6,6 +6,10 @@ from urllib.parse import urlparse
 DEFAULT_BASE_URL = "http://127.0.0.1:8082/api/v1"
 
 
+def in_agent_session() -> bool:
+    return "INFISICAL_AGENT_VAULT_URL" in os.environ or "RUNBOX_POLICY" in os.environ
+
+
 def base_url(value: str | None = None) -> str:
     value = (value or os.getenv("AGENTBRIDGE_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
     parsed = urlparse(value)

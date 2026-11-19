@@ -6,6 +6,7 @@ import urllib.error
 from email.message import Message
 
 import nbformat
+import pytest
 import yaml
 
 from runbook.requirements_plan import (
@@ -276,6 +277,7 @@ def test_openrouter_request_uses_high_reasoning(monkeypatch):
 
     def fake_urlopen(request, timeout):
         assert timeout == 120
+        assert request.get_header("Authorization") == "Bearer sk-test"
         captured_payload.update(json.loads(request.data.decode("utf-8")))
         return FakeResponse()
 
@@ -286,6 +288,68 @@ def test_openrouter_request_uses_high_reasoning(monkeypatch):
     assert captured_payload["model"] == "openrouter/openai/gpt-5.5"
     assert captured_payload["max_completion_tokens"] == 16000
     assert captured_payload["reasoning"] == {"effort": "high", "exclude": True}
+
+
+def test_agent_planner_uses_scoped_gateway_placeholder(monkeypatch):
+    monkeypatch.setenv("INFISICAL_AGENT_VAULT_URL", "https://vault.example")
+    monkeypatch.setenv("RUNBOOK_GATEWAY_MODE", "scoped-placeholder")
+    monkeypatch.setenv("AGENTBRIDGE_BASE_URL", "http://127.0.0.1:8082/api/v1")
+    monkeypatch.setenv("AGENTBRIDGE_API_KEY", "agentbridge_public_placeholder")
+
+    def fake_urlopen(request, timeout):
+        assert request.full_url == "http://127.0.0.1:8082/api/v1/chat/completions"
+        assert request.get_method() == "POST"
+        assert request.get_header("Authorization") == "Bearer agentbridge_public_placeholder"
+        return io.BytesIO(b'{"choices":[{"message":{"parsed":{"ok":true}}}]}')
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    assert _call_openrouter("import pandas", "openai/gpt-5.5") == {"ok": True}
+
+
+@pytest.mark.parametrize(
+    ("marker", "mode", "endpoint", "environment_key", "explicit_key"),
+    [
+        ("RUNBOX_POLICY", None, None, "agentbridge_public_placeholder", None),
+        ("RUNBOX_POLICY", "scoped-placeholder", None, None, None),
+        ("INFISICAL_AGENT_VAULT_URL", "scoped-placeholder", None, "synthetic-key", None),
+        (
+            "INFISICAL_AGENT_VAULT_URL",
+            "scoped-placeholder",
+            None,
+            "agentbridge_public_placeholder",
+            "synthetic-key",
+        ),
+        (
+            "RUNBOX_POLICY",
+            "scoped-placeholder",
+            "https://gateway.example",
+            "agentbridge_public_placeholder",
+            None,
+        ),
+    ],
+)
+def test_agent_planner_refuses_unscoped_gateway(
+    monkeypatch, marker, mode, endpoint, environment_key, explicit_key
+):
+    monkeypatch.setenv(marker, "synthetic-session")
+    monkeypatch.delenv("AGENTBRIDGE_BASE_URL", raising=False)
+    monkeypatch.delenv("AGENTBRIDGE_API_KEY", raising=False)
+    monkeypatch.delenv("RUNBOOK_GATEWAY_MODE", raising=False)
+    if mode is not None:
+        monkeypatch.setenv("RUNBOOK_GATEWAY_MODE", mode)
+    if endpoint is not None:
+        monkeypatch.setenv("AGENTBRIDGE_BASE_URL", endpoint)
+    if environment_key is not None:
+        monkeypatch.setenv("AGENTBRIDGE_API_KEY", environment_key)
+
+    def unexpected_request(*args, **kwargs):
+        pytest.fail("Agent planning used an unscoped gateway")
+
+    monkeypatch.setattr("urllib.request.urlopen", unexpected_request)
+
+    with pytest.raises(RequirementsConfigError, match="scoped AgentBridge route"):
+        _call_openrouter("import pandas", "openai/gpt-5.5", api_key=explicit_key)
 
 
 def test_openrouter_retries_transient_errors(monkeypatch):

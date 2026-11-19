@@ -16,7 +16,7 @@ from typing import Any
 import nbformat
 import yaml
 
-from runbook.agentbridge import base_url, model_id
+from runbook.agentbridge import base_url, in_agent_session, model_id
 from runbook.files import atomic_write_text
 
 DEFAULT_TIMEOUT = 3600
@@ -383,7 +383,18 @@ def _call_openrouter(
     retries: int = DEFAULT_OPENROUTER_RETRIES,
     timeout_seconds: int = DEFAULT_OPENROUTER_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    selected_api_key = api_key or os.environ.get("AGENTBRIDGE_API_KEY") or "not-needed"
+    gateway_key = os.environ.get("AGENTBRIDGE_API_KEY")
+    endpoint = f"{base_url()}/chat/completions"
+    if in_agent_session():
+        placeholder = "agentbridge_public_placeholder"
+        if (
+            os.environ.get("RUNBOOK_GATEWAY_MODE") != "scoped-placeholder"
+            or endpoint != AGENTBRIDGE_CHAT_COMPLETIONS_URL
+            or gateway_key != placeholder
+            or api_key not in (None, placeholder)
+        ):
+            raise RequirementsConfigError("Agent planning requires the scoped AgentBridge route.")
+    selected_api_key = api_key or gateway_key or "not-needed"
 
     payload = {
         "model": model_id(model),
@@ -429,6 +440,7 @@ def _call_openrouter(
     response_body = _openrouter_request_with_retries(
         payload,
         selected_api_key,
+        endpoint=endpoint,
         retries=retries,
         timeout_seconds=timeout_seconds,
     )
@@ -446,6 +458,7 @@ def _openrouter_request_with_retries(
     payload: dict[str, Any],
     api_key: str,
     *,
+    endpoint: str,
     retries: int,
     timeout_seconds: int,
 ) -> str:
@@ -453,7 +466,7 @@ def _openrouter_request_with_retries(
     attempts = max(retries, 0) + 1
     for attempt in range(attempts):
         request = urllib.request.Request(
-            f"{base_url()}/chat/completions",
+            endpoint,
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {api_key}",

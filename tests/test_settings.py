@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from runbook.requirements_plan import DEFAULT_OPENROUTER_MODEL
 from runbook.settings import (
     OpenRouterSettings,
@@ -34,3 +36,22 @@ def test_settings_default_model(monkeypatch, tmp_path):
 
     assert settings.api_key == "not-needed"
     assert settings.model == DEFAULT_OPENROUTER_MODEL
+
+
+def test_agent_settings_skip_local_credential_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("RUNBOOK_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("RUNBOX_POLICY", "synthetic-session")
+    monkeypatch.setenv("AGENTBRIDGE_API_KEY", "agentbridge_public_placeholder")
+    monkeypatch.setenv("RUNBOOK_OPENROUTER_MODEL", "openai/fixture")
+
+    def unexpected_read(path):
+        pytest.fail("Agent session opened local credentials")
+
+    monkeypatch.setattr("runbook.settings._read_env_file", unexpected_read)
+
+    assert load_openrouter_settings() == OpenRouterSettings(
+        api_key="agentbridge_public_placeholder", model="openai/fixture"
+    )
+    with pytest.raises(ValueError, match="cannot write local AgentBridge settings"):
+        save_openrouter_settings(OpenRouterSettings(api_key="synthetic-key"))
+    assert not runbook_env_path().exists()

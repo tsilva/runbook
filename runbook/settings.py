@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from runbook.agentbridge import in_agent_session
 from runbook.files import atomic_write_text
 from runbook.requirements_plan import DEFAULT_OPENROUTER_MODEL
 
@@ -32,7 +33,7 @@ def init_settings_dir() -> Path:
 
 
 def load_openrouter_settings() -> OpenRouterSettings:
-    values = _read_env_file(runbook_env_path())
+    values = {} if in_agent_session() else _read_env_file(runbook_env_path())
     api_key = (
         os.environ.get("AGENTBRIDGE_API_KEY") or values.get("AGENTBRIDGE_API_KEY") or "not-needed"
     )
@@ -45,6 +46,8 @@ def load_openrouter_settings() -> OpenRouterSettings:
 
 
 def save_openrouter_settings(settings: OpenRouterSettings) -> None:
+    if in_agent_session():
+        raise ValueError("Agent sessions cannot write local AgentBridge settings.")
     init_settings_dir()
     values = {
         "AGENTBRIDGE_API_KEY": settings.api_key or "",

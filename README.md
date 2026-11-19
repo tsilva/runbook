@@ -143,6 +143,9 @@ Existing model choices are preserved and gain the gateway's `openrouter/`
 namespace on requests. Image generation and embeddings require the gateway
 application routes; there is no direct-provider fallback.
 
+Agent sessions use the scoped planner with its gateway placeholder and skip
+loading saved local credentials.
+
 ## License
 
 MIT. See [LICENSE](./LICENSE).
